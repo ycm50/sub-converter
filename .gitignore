@@ -1,0 +1,42 @@
+# 构建产物
+build/
+cmake-build-*/
+out/
+
+# 校验工具链下载的二进制（仅开发期使用）
+tools/bin/
+
+# 生成产物
+tests/fixtures/out_*
+
+# 订阅缓存（--cache-dir 指到仓库内时）
+cache/
+subconv-cache/
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.code-workspace
+*.user
+compile_commands.json
+.cache/
+.clangd/
+
+# 临时产物
+*.obj
+*.o
+*.pdb
+*.ilk
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+*.gcda
+*.gcno
+NUL
+
+# 操作系统
+.DS_Store
+Thumbs.db
+Desktop.ini
