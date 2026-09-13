@@ -927,6 +927,23 @@ void test_sniff_and_userinfo() {
         ContentKind::ClashYaml);
   CHECK(subconv::fetch::sniff_content(R"({"outbounds":[]})") == ContentKind::JsonConfig);
   CHECK(subconv::fetch::sniff_content("[]") == ContentKind::JsonConfig);
+  // 但 JSON 版 Clash 配置（mihomo 直接支持，BPB 面板 ?app=clash 返回的就是它）要走 Clash 解析
+  CHECK(subconv::fetch::sniff_content(
+            R"({"mixed-port":7890,"proxies":[{"name":"a","type":"ss"}]})") ==
+        ContentKind::ClashYaml);
+  CHECK(subconv::fetch::sniff_content(
+            R"({"proxies":[{"name":"a","type":"trojan","password":"p"}]})") ==
+        ContentKind::ClashYaml);
+  CHECK(subconv::fetch::sniff_content(R"({"proxy-groups":[{"name":"g","type":"select"}]})") ==
+        ContentKind::ClashYaml);
+  // proxies 段可以排在几千字节的前置配置之后（判断窗口不能只有 4KB）
+  CHECK(subconv::fetch::sniff_content(
+            R"({"mixed-port":7890,"dns":{"nameserver":["1.1.1.1"]},"pad":")" +
+            std::string(5000, 'x') + R"(","proxies":[]})") == ContentKind::ClashYaml);
+  // sing-box / Xray 的 JSON 不能因为含 proxy 字样的键就被当成 Clash
+  CHECK(subconv::fetch::sniff_content(
+            R"({"log":{"level":"info"},"outbounds":[{"type":"direct","tag":"direct"}]})") ==
+        ContentKind::JsonConfig);
   CHECK(subconv::fetch::sniff_content("") == ContentKind::Unknown);
   // 整体 Base64 包裹的订阅
   CHECK(subconv::fetch::sniff_content(
@@ -1065,6 +1082,52 @@ proxies:
 
   CHECK(!subconv::parse_clash_yaml("proxies: []", "t").has_value());
   CHECK(!subconv::parse_clash_yaml("这不是: [合法的: yaml", "t").has_value());
+
+  // JSON 版 Clash 配置：YAML 是 JSON 的超集，mihomo 能吃，我们也要能在嗅探后直接当输入源
+  const std::string json_clash = R"({"mixed-port":7890,"proxies":[
+    {"name":"JSON-VL","type":"vless","server":"j.example.com","port":443,
+     "uuid":"b831381d-6324-4d53-ad4f-8cda48b30811","tls":true,"network":"ws",
+     "ws-opts":{"path":"/jw","headers":{"Host":"j.example.com"}}}]})";
+  {
+    auto json_sub = subconv::fetch::parse_content(json_clash, "粘贴内容");
+    CHECK(json_sub.has_value());
+    if (json_sub) {
+      CHECK_EQ(json_sub->nodes.size(), static_cast<std::size_t>(1));
+      if (!json_sub->nodes.empty()) {
+        const auto& n = json_sub->nodes[0];
+        CHECK_EQ(n.name, std::string("JSON-VL"));
+        CHECK(n.protocol == subconv::Protocol::Vless);
+        CHECK(n.network == subconv::Network::Ws);
+        CHECK_EQ(n.ws.path, std::string("/jw"));
+        CHECK_EQ(n.ws.host, std::string("j.example.com"));
+        CHECK(n.tls.enabled);
+      }
+    }
+  }
+  // sing-box 的 JSON 仍然给「JSON 配置暂不支持」这类针对性报错
+  {
+    auto cfg = subconv::fetch::parse_content(
+        R"({"log":{"level":"info"},"outbounds":[{"type":"direct","tag":"direct"}]})", "t");
+    CHECK(!cfg.has_value());
+    if (!cfg) CHECK(cfg.error().message.find("JSON 配置") != std::string::npos);
+  }
+
+  // yaml-cpp 的行号要翻译成人话：报出出问题的原始行，并提示缩进
+  // （这就是「粘贴时整段丢了缩进」的真实死法：第二个节点开始报 end of map not found）
+  {
+    auto broken = subconv::parse_clash_yaml(
+        "proxies:\n- name: a\ntype: ss\nserver: h\nport: 8388\ncipher: aes-256-gcm\n"
+        "password: pw\n- name: b\ntype: ss\nserver: h2\nport: 8389\ncipher: aes-256-gcm\n"
+        "password: pw\n",
+        "t");
+    CHECK(!broken.has_value());
+    if (!broken) {
+      const std::string message = broken.error().message;
+      CHECK(message.find("Clash YAML 解析失败") != std::string::npos);
+      CHECK(message.find("第 8 行: - name: b") != std::string::npos);
+      CHECK(message.find("缩进") != std::string::npos);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1734,6 +1797,249 @@ void test_v2rayn_share() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// XHTTP（Xray 的 splithttp / mihomo 的 xhttp）
+//
+// 一元机场（smallstrawberry）2026 年的 Clash 订阅就是这个形态：vless + network: xhttp，
+// 并用 download-settings 把「下载」指向另一台机器。三个内核对它的支持并不一致
+// （mihomo 只接 vless、sing-box 根本没有），这里逐条钉住解析与三个目标的产出。
+// ---------------------------------------------------------------------------
+void test_xhttp() {
+  section("XHTTP 传输");
+
+  const std::string yaml = R"(
+proxies:
+  - name: XH
+    type: vless
+    server: up.example.com
+    port: 443
+    uuid: 9129efa3-af16-4c74-8de4-f1ae26e6105e
+    udp: true
+    tls: true
+    servername: update.microsoft.com
+    skip-cert-verify: true
+    network: xhttp
+    xhttp-opts:
+      path: /path
+      mode: stream-up
+      download-settings:
+        path: /path
+        server: down.example.com
+        port: 8443
+        servername: update.microsoft.com
+  - name: VX
+    type: vmess
+    server: vm.example.com
+    port: 443
+    uuid: 9129efa3-af16-4c74-8de4-f1ae26e6105e
+    cipher: auto
+    tls: true
+    network: xhttp
+    xhttp-opts:
+      path: /vx
+      mode: packet-up
+)";
+  auto sub = subconv::parse_clash_yaml(yaml, "test");
+  CHECK(sub.has_value());
+  if (!sub) return;
+  CHECK_EQ(sub->nodes.size(), std::size_t{2});
+
+  const subconv::ProxyNode& xh = sub->nodes[0];
+  CHECK(xh.network == subconv::Network::Xhttp);
+  CHECK_EQ(xh.xhttp.path, std::string("/path"));
+  CHECK_EQ(xh.xhttp.mode, std::string("stream-up"));
+  CHECK(xh.xhttp.download.present);
+  CHECK_EQ(xh.xhttp.download.server, std::string("down.example.com"));
+  CHECK(xh.xhttp.download.port.has_value());
+  CHECK_EQ(*xh.xhttp.download.port, static_cast<uint16_t>(8443));
+  CHECK_EQ(xh.xhttp.download.sni, std::string("update.microsoft.com"));
+  CHECK_EQ(xh.xhttp.download.path, std::string("/path"));
+  // 没写的字段必须是「未指定」——填了默认值就把内核的"沿用主节点"改成"覆盖"了
+  CHECK(!xh.xhttp.download.tls.has_value());
+  CHECK(!xh.xhttp.download.insecure.has_value());
+
+  // --- clash（mihomo）---
+  subconv::EmitOptions co;
+  co.target = "clash";
+  std::vector<std::string> cw;
+  auto clash = subconv::emit_config(sub->nodes, co, &cw);
+  CHECK(clash.has_value());
+  if (clash) {
+    CHECK(clash->find("network: xhttp") != std::string::npos);
+    CHECK(clash->find("mode: stream-up") != std::string::npos);
+    CHECK(clash->find("server: down.example.com") != std::string::npos);
+    CHECK(clash->find("port: 8443") != std::string::npos);
+    // mihomo 的 xhttp 只挂在 vless 出站上：vmess 那个要跳过并告警，而不是产出连不上的配置
+    CHECK(clash->find("vm.example.com") == std::string::npos);
+    CHECK_EQ(cw.size(), std::size_t{1});
+  }
+
+  // 原版 Clash 连 vless 都没有，xhttp 更不可能有
+  {
+    subconv::EmitOptions legacy;
+    legacy.target = "clash";
+    legacy.clash_legacy = true;
+    auto out = subconv::emit_config(sub->nodes, legacy);
+    CHECK(!out.has_value());
+  }
+
+  // --- xray ---
+  subconv::EmitOptions xo;
+  xo.target = "xray";
+  std::vector<std::string> xw;
+  auto xray = subconv::emit_config(sub->nodes, xo, &xw);
+  CHECK(xray.has_value());
+  if (xray) {
+    const Json j = Json::parse(*xray, nullptr, false);
+    CHECK(!j.is_discarded());
+    const Json* vless_out = nullptr;
+    bool has_vmess = false;
+    for (const auto& o : j["outbounds"]) {
+      const std::string tag = o.value("tag", std::string());
+      if (tag == "XH") vless_out = &o;
+      if (tag == "VX") has_vmess = true;
+    }
+    CHECK(vless_out != nullptr);
+    if (vless_out != nullptr) {
+      const Json& stream = (*vless_out)["streamSettings"];
+      CHECK_EQ(stream["network"], std::string("xhttp"));
+      CHECK_EQ(stream["xhttpSettings"]["path"], std::string("/path"));
+      CHECK_EQ(stream["xhttpSettings"]["mode"], std::string("stream-up"));
+      const Json& ds = stream["xhttpSettings"]["downloadSettings"];
+      CHECK_EQ(ds["address"], std::string("down.example.com"));
+      CHECK_EQ(ds["port"], 8443);
+      CHECK_EQ(ds["network"], std::string("xhttp"));
+      CHECK_EQ(ds["security"], std::string("tls"));
+      CHECK_EQ(ds["xhttpSettings"]["path"], std::string("/path"));
+      CHECK_EQ(ds["tlsSettings"]["serverName"], std::string("update.microsoft.com"));
+      // 主节点 skip-cert-verify 为真：Xray 的 downloadSettings 是另起一份 StreamConfig、
+      // 不会继承，必须显式补 verifyPeerCertByName，否则下载方向会严格校验证书
+      CHECK(ds["tlsSettings"].contains("verifyPeerCertByName"));
+    }
+    // Xray 支持 vmess + xhttp，不能跟着 mihomo 一起裁掉
+    CHECK(has_vmess);
+    // 两个节点都是 skip-cert-verify 又没探测过指纹 → 一条汇总告警，提醒用 --probe-cert
+    CHECK_EQ(xw.size(), std::size_t{1});
+    if (!xw.empty()) CHECK(xw[0].find("probe-cert") != std::string::npos);
+  }
+
+  // --- sing-box：没有 xhttp，整份都留不下 ---
+  subconv::EmitOptions so;
+  so.target = "singbox";
+  std::vector<std::string> sw;
+  auto sb = subconv::emit_config(sub->nodes, so, &sw);
+  CHECK(!sb.has_value());
+  CHECK_EQ(sw.size(), std::size_t{2});
+  if (!sw.empty()) CHECK(sw[0].find("xhttp") != std::string::npos);
+
+  // --- 分享链接（v2rayNG / v2rayN 的 type=xhttp + extra=JSON）---
+  subconv::EmitOptions lo;
+  lo.target = "links";
+  std::vector<std::string> lw;
+  auto links = subconv::emit_config(sub->nodes, lo, &lw);
+  CHECK(links.has_value());
+  if (links) {
+    CHECK(links->find("type=xhttp") != std::string::npos);
+    CHECK(links->find("mode=stream-up") != std::string::npos);
+    CHECK(links->find("extra=") != std::string::npos);
+
+    // 往返：把我们生成的链接解析回来，download-settings 必须逐字段还原
+    bool checked = false;
+    for (const auto& line : split(*links, '\n')) {
+      if (line.empty()) continue;
+      auto node = subconv::parse_node(line);
+      CHECK(node.has_value());
+      if (!node || node->name != "XH") continue;
+      checked = true;
+      CHECK(node->network == subconv::Network::Xhttp);
+      CHECK_EQ(node->xhttp.path, std::string("/path"));
+      CHECK_EQ(node->xhttp.mode, std::string("stream-up"));
+      CHECK(node->xhttp.download.present);
+      CHECK_EQ(node->xhttp.download.server, std::string("down.example.com"));
+      CHECK(node->xhttp.download.port.has_value());
+      CHECK_EQ(*node->xhttp.download.port, static_cast<uint16_t>(8443));
+      CHECK_EQ(node->xhttp.download.sni, std::string("update.microsoft.com"));
+      // extra 里带着 tlsSettings → 解析回 tls=true / insecure=true，语义与"沿用主节点"等价
+      CHECK(node->xhttp.download.tls.value_or(false));
+      CHECK(node->xhttp.download.insecure.value_or(false));
+      // 原始 extra 原样留在 node.extra 里，供 Xray 目标透传
+      CHECK(node->extra.find("xhttpExtra") != node->extra.end());
+    }
+    CHECK(checked);
+
+    // 纯 vless+xhttp 的 links 输出能被 v2rayn 目标复用（XhttpMode/XhttpExtra 两个字段）
+    subconv::EmitOptions vo;
+    vo.target = "v2rayn";
+    auto v2 = subconv::emit_config(sub->nodes, vo, &lw);
+    CHECK(v2.has_value());
+    if (v2) {
+      bool found = false;
+      for (const auto& line : split(*v2, '\n')) {
+        if (line.empty()) continue;
+        const auto payload = base64_decode(line.substr(line.rfind('/') + 1));
+        if (!payload) continue;
+        if (payload->find("\"XhttpMode\":\"stream-up\"") != std::string::npos) found = true;
+      }
+      CHECK(found);
+    }
+  }
+
+  // --- 证书指纹：Xray 25+ 移除 allowInsecure 后，唯一能放行「证书与 SNI 对不上」的参数 ---
+  const std::string pin =
+      "BE:3F:8A:0E:2A:17:A8:DF:FD:B6:23:67:EE:7B:90:5B:28:17:3C:47:78:E3:63:59:D1:07:2F:48:"
+      "02:D8:B1:2F";
+  {
+    // 链接里的 `pcs=`（v2rayN / v2rayNG 的写法，也是 --probe-cert 写出来的东西）必须被解析
+    auto node = subconv::parse_node(
+        "vless://9129efa3-af16-4c74-8de4-f1ae26e6105e@pin.example.com:443"
+        "?encryption=none&security=tls&sni=update.microsoft.com&type=xhttp&path=%2Fpath"
+        "&pcs=BE%3A3F%3A8A%3A0E%3A2A%3A17%3AA8%3ADF%3AFD%3AB6%3A23%3A67%3AEE%3A7B%3A90%3A5B"
+        "%3A28%3A17%3A3C%3A47%3A78%3AE3%3A63%3A59%3AD1%3A07%3A2F%3A48%3A02%3AD8%3AB1%3A2F"
+        "&allowInsecure=1#PIN");
+    CHECK(node.has_value());
+    if (node) {
+      CHECK_EQ(node->tls.pinned_cert_sha256, pin);
+      subconv::EmitOptions xo2;
+      xo2.target = "xray";
+      std::vector<std::string> w2;
+      auto out2 = subconv::emit_config({*node}, xo2, &w2);
+      CHECK(out2.has_value());
+      if (out2) {
+        const Json j = Json::parse(*out2, nullptr, false);
+        const Json& tls = j["outbounds"][0]["streamSettings"]["tlsSettings"];
+        CHECK_EQ(tls["pinnedPeerCertSha256"], pin);
+        // 有指纹就不该再写 vcn：Xray 侧 vcn 仍要求链可信 + 名字匹配，只会帮倒忙
+        CHECK(!tls.contains("verifyPeerCertByName"));
+      }
+      CHECK(w2.empty());  // 有指纹 → 不再告警
+    }
+  }
+  {
+    // 没指纹时退回 vcn，并且必须告警告诉用户怎么修（这就是「客户端全是 -1」的根因）
+    subconv::ProxyNode node;
+    node.protocol = subconv::Protocol::Vless;
+    node.name = "no-pin";
+    node.server = "np.example.com";
+    node.port = 443;
+    node.uuid = "9129efa3-af16-4c74-8de4-f1ae26e6105e";
+    node.tls.enabled = true;
+    node.tls.insecure = true;
+    node.tls.sni = "update.microsoft.com";
+    subconv::EmitOptions xo3;
+    xo3.target = "xray";
+    std::vector<std::string> w3;
+    auto out3 = subconv::emit_config({node}, xo3, &w3);
+    CHECK(out3.has_value());
+    if (out3) {
+      const Json j = Json::parse(*out3, nullptr, false);
+      CHECK_EQ(j["outbounds"][0]["streamSettings"]["tlsSettings"]["verifyPeerCertByName"],
+               std::string("update.microsoft.com"));
+    }
+    CHECK_EQ(w3.size(), std::size_t{1});
+    if (!w3.empty()) CHECK(w3[0].find("probe-cert") != std::string::npos);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1756,6 +2062,7 @@ int main() {
   test_console_encoding();
   test_share_links();
   test_v2rayn_share();
+  test_xhttp();
 
   std::printf("\n%d 项断言，%d 项失败\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;

@@ -131,6 +131,14 @@ Result<ConvertResult> convert(const ConvertRequest& req) {
       !codec::trim(req.filename).empty() ? codec::trim(req.filename) : codec::trim(emit.filename);
   emit.filename = given_name;
 
+  if (emit.probe_cert) {
+    const std::size_t probed = fetch::probe_node_certificates(all, emit.probe_cert_timeout_seconds,
+                                                              &warnings);
+    if (probed > 0) {
+      warnings.push_back("已探测 " + std::to_string(probed) + " 个证书指纹（probe_cert=1）");
+    }
+  }
+
   auto config = emit_config(all, emit, &warnings);
   if (!config) return fail(config.error());
 

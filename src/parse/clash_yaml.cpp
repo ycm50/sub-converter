@@ -20,6 +20,39 @@ namespace {
 
 using YamlNode = YAML::Node;
 
+/// 从 yaml-cpp 的 "yaml-cpp: error at line 77, column 1: ..." 里取出行号（1 起，取不到为 0）。
+std::size_t error_line_number(std::string_view message) {
+  const std::size_t at = message.find("line ");
+  if (at == std::string_view::npos) return 0;
+  std::size_t i = at + 5;
+  std::size_t value = 0;
+  bool any = false;
+  while (i < message.size() && message[i] >= '0' && message[i] <= '9') {
+    value = value * 10 + static_cast<std::size_t>(message[i] - '0');
+    ++i;
+    any = true;
+  }
+  return any ? value : 0;
+}
+
+/// 第 number 行（1 起）的原始文本，用来把 yaml-cpp 的行号变成用户看得懂的一行。
+std::string line_at(std::string_view text, std::size_t number) {
+  if (number == 0) return {};
+  std::size_t line = 1;
+  std::size_t start = 0;
+  for (std::size_t i = 0; i <= text.size(); ++i) {
+    if (i != text.size() && text[i] != '\n') continue;
+    if (line == number) {
+      std::string_view piece = text.substr(start, i - start);
+      while (!piece.empty() && (piece.back() == '\r' || piece.back() == ' ')) piece.remove_suffix(1);
+      return std::string(piece);
+    }
+    ++line;
+    start = i + 1;
+  }
+  return {};
+}
+
 std::string ystr(const YamlNode& n, const char* key) {
   const YamlNode v = n[key];
   if (!v || !v.IsScalar()) return {};
@@ -102,11 +135,18 @@ void apply_tls_from_yaml(ProxyNode& node, const YamlNode& p) {
 
 void apply_transport_from_yaml(ProxyNode& node, const YamlNode& p) {
   const std::string network = codec::to_lower(ystr(p, "network"));
-  if (network.empty() || network == "tcp") {
+  if (network.empty() || network == "tcp" || network == "raw") {
     node.network = Network::Tcp;
     return;
   }
-  if (auto n = network_from_string(network)) node.network = *n;
+  // 注意 `network: http` 在 Clash 里是 **HTTP 传输层**（http-opts），不是 h2；
+  // network_from_string 把 "http" 折叠成 H2 是给分享链接用的（type=h2/http 同义），
+  // 所以这里必须先拦下来，否则 http-opts 永远不会被读到。
+  if (network == "http") {
+    node.network = Network::Http;
+  } else if (auto n = network_from_string(network)) {
+    node.network = *n;
+  }
 
   switch (node.network) {
     case Network::Ws: {
@@ -153,6 +193,39 @@ void apply_transport_from_yaml(ProxyNode& node, const YamlNode& p) {
         if (!paths.empty()) node.h2.path = paths.front();
         const YamlNode headers = http["headers"];
         if (headers && headers.IsMap()) node.h2.host = ylist(headers["Host"]);
+      }
+      break;
+    }
+    case Network::Xhttp: {
+      const YamlNode xhttp = p["xhttp-opts"];
+      if (!xhttp || !xhttp.IsMap()) break;
+      node.xhttp.path = ystr(xhttp, "path");
+      node.xhttp.host = ystr(xhttp, "host");
+      node.xhttp.mode = ystr(xhttp, "mode");
+      const YamlNode headers = xhttp["headers"];
+      if (headers && headers.IsMap()) {
+        for (const auto& kv : headers) {
+          if (kv.second.IsScalar()) {
+            node.xhttp.headers[kv.first.as<std::string>()] = kv.second.as<std::string>();
+          }
+        }
+      }
+      // download-settings：上传/下载分流的覆盖项（mihomo 与 Xray 同名同义）
+      const YamlNode ds = xhttp["download-settings"];
+      if (ds && ds.IsMap()) {
+        XhttpDownloadOptions& d = node.xhttp.download;
+        d.present = true;
+        d.server = ystr(ds, "server");
+        if (const int port = yint(ds, "port", 0); port > 0 && port <= 65535) {
+          d.port = static_cast<uint16_t>(port);
+        }
+        d.path = ystr(ds, "path");
+        d.host = ystr(ds, "host");
+        d.sni = ystr_any(ds, {"servername", "sni", "server-name"});
+        if (const YamlNode tls = ds["tls"]; tls && tls.IsScalar()) d.tls = ybool(ds, "tls");
+        if (const YamlNode scv = ds["skip-cert-verify"]; scv && scv.IsScalar()) {
+          d.insecure = ybool(ds, "skip-cert-verify");
+        }
       }
       break;
     }
@@ -299,7 +372,15 @@ Result<Subscription> parse_clash_yaml(std::string_view yaml, std::string source)
   try {
     root = YAML::Load(std::string(yaml));
   } catch (const std::exception& e) {
-    return fail(std::string("Clash YAML 解析失败: ") + e.what());
+    const std::string message = e.what();
+    std::string detail = "Clash YAML 解析失败: " + message;
+    const std::size_t number = error_line_number(message);
+    if (const std::string line = line_at(yaml, number); !line.empty()) {
+      detail += "\n第 " + std::to_string(number) + " 行: " + line;
+    }
+    detail += "\n提示：YAML 靠行首缩进表达层级，粘贴时请保留原始缩进（整段去缩进会导致 "
+              "end of map not found）。";
+    return fail(detail);
   }
   if (!root || !root.IsMap()) return fail("Clash YAML 根节点不是映射");
 

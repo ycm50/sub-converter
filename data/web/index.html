@@ -183,10 +183,11 @@
 <main>
   <section class="panel">
     <h2>输入</h2>
-    <textarea id="input" spellcheck="false" placeholder="每行一个订阅链接，例如：&#10;https://example.com/api/v1/client/subscribe?token=xxx&#10;&#10;也可以直接粘贴分享链接（ss:// vmess:// vless:// trojan:// …）、Base64 订阅或 Clash YAML"></textarea>
+    <textarea id="input" spellcheck="false" placeholder="每行一个订阅链接，例如：&#10;https://example.com/api/v1/client/subscribe?token=xxx&#10;&#10;也可以直接粘贴分享链接（ss:// vmess:// vless:// trojan:// …）、Base64 订阅、Clash YAML 或 JSON 版 Clash 配置"></textarea>
     <p class="hint">
-      <b>http(s)://</b> 开头的行按订阅链接抓取（走服务端代理设置）；其余行会合并成一段
-      <b>订阅内容</b>直接解析 —— 分享链接列表、Base64 包裹、Clash YAML 都自动识别。
+      <b>独占一行</b>且<b>顶格</b>的 <b>http(s)://</b> 行按订阅链接抓取（走服务端代理设置）；
+      其余行<b>原样保留缩进</b>合并成一段<b>订阅内容</b>直接解析 ——
+      分享链接列表、Base64 包裹、Clash YAML（含 JSON 版）都自动识别。
     </p>
     <div class="row">
       <button id="example" type="button">填入示例</button>
@@ -227,6 +228,7 @@
           <label class="opt"><input type="checkbox" id="opt-sort">按名称排序</label>
           <label class="opt"><input type="checkbox" id="opt-tfo">TCP Fast Open</label>
           <label class="opt"><input type="checkbox" id="opt-ipv6" checked>IPv6</label>
+          <label class="opt" title="连接每个节点取对端证书 SHA256 指纹。Xray 25+ 移除了 allowInsecure，机场那种「证书与 SNI 对不上」的节点只能靠指纹放行，否则客户端里全是 -1"><input type="checkbox" id="opt-probecert">探测证书指纹</label>
           <label class="opt"><input type="checkbox" id="opt-legacy">原版 Clash 语法</label>
         </div>
         <!-- 勾上「输出 rules」才出现：可选分流规则集。
@@ -477,7 +479,8 @@
       sort: $("opt-sort").checked,
       tfo: $("opt-tfo").checked,
       ipv6: $("opt-ipv6").checked,
-      clash_legacy: $("opt-legacy").checked
+      clash_legacy: $("opt-legacy").checked,
+      probe_cert: $("opt-probecert").checked
     };
     // 目录没加载成功时留空（JSON.stringify 会丢掉 undefined 键）→ 用服务端默认
     if (RULESET_IDS !== null) options.rulesets = selectedRuleSets();
@@ -494,13 +497,16 @@
     return fetchOptions;
   }
 
-  /** http(s) 行 → 订阅链接；其余行 → 订阅内容。 */
+  /** 独占一行、行首无缩进的裸 http(s) 链接 → 订阅链接；其余行**原样保留**（含缩进）→ 订阅内容。
+   *  注意：这里绝不能把 trim 过的行拼回内容 —— YAML / JSON 靠行首缩进表达结构，
+   *  整段去缩进会把 Clash YAML 变成「yaml-cpp: end of map not found」。 */
   function splitInput(text) {
     var sources = [], others = [];
     text.split(/\r?\n/).forEach(function (line) {
       var t = line.trim();
-      if (!t) return;
-      if (/^https?:\/\//i.test(t)) sources.push(t); else others.push(t);
+      var bareUrl = t !== "" && line === line.replace(/^[ \t]+/, "") && /^https?:\/\/\S+$/i.test(t);
+      if (bareUrl) { sources.push(t); return; }
+      others.push(line);
     });
     return { sources: sources, content: others.join("\n") };
   }
@@ -589,7 +595,8 @@
     var params = ["target=" + encodeURIComponent(payload.target)];
     if (payload.sources.length) {
       params.push("url=" + encodeURIComponent(payload.sources.join("|")));
-    } else {
+    }
+    if (payload.content.trim()) {
       params.push("content=" + encodeURIComponent(payload.content));
     }
     if (!payload.options.emoji) params.push("emoji=false");
@@ -600,6 +607,7 @@
     if (payload.options.tfo) params.push("tfo=true");
     if (!payload.options.ipv6) params.push("ipv6=false");
     if (payload.options.clash_legacy) params.push("clash_legacy=true");
+    if (payload.options.probe_cert) params.push("probe_cert=true");
     if (payload.filename) params.push("filename=" + encodeURIComponent(payload.filename));
     // 显式带上规则集/DNS，链接才能复现界面上的选择（空串 = 只留 MATCH / 不写 nameserver）
     if (payload.options.rulesets) {
@@ -622,7 +630,7 @@
     var name = $("opt-name").value.trim();
     if (name) payload.filename = name;
 
-    if (!payload.sources.length && !payload.content) {
+    if (!payload.sources.length && !payload.content.trim()) {
       showError("请先填入订阅链接或订阅内容（可以点「填入示例」试试）。");
       return;
     }

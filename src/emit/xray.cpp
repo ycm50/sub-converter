@@ -83,6 +83,11 @@ Json build_stream_settings(const ProxyNode& n) {
     }
     case Network::Quic: stream["network"] = "quic"; break;
     case Network::Kcp: stream["network"] = "kcp"; break;
+    case Network::Xhttp: {
+      stream["network"] = "xhttp";
+      stream["xhttpSettings"] = xhttp_settings_json(n);
+      break;
+    }
     case Network::Tcp: stream["network"] = "tcp"; break;
   }
 
@@ -103,17 +108,24 @@ Json build_stream_settings(const ProxyNode& n) {
     Json tls = Json::object();
     const std::string sni = effective_sni(n);
     tls["serverName"] = sni;
-    if (n.tls.insecure && !sni.empty()) {
-      // Xray v25+ 已移除 allowInsecure，官方迁移路径是 pinnedPeerCertSha256 /
-      // verifyPeerCertByName。订阅链接里拿不到证书指纹，因此用"按名字校验"来
-      // 兼容自签名证书。
+    // Xray v25+ 移除了 allowInsecure（加载时直接报
+    //   The feature "allowInsecure" has been removed and migrated to
+    //   "pinnedPeerCertSha256"(pcs) and "verifyPeerCertByName"(vcn).
+    // ），而两条替代路径的语义并不相同：
+    //   * pinnedPeerCertSha256：命中叶子证书就**立即放行**（不校链、不校名），等价于
+    //     skip-cert-verify —— `--probe-cert` 探测出来的正是它；
+    //   * verifyPeerCertByName：仍要求"证书链可信 **且** 名字匹配"，机场那种「证书与
+    //     SNI 对不上」的节点用它必然失败（客户端表现是所有节点延迟 -1），只能当退路。
+    // 注意 pinnedPeerCertSha256 在 Xray 侧是**逗号分隔的字符串**，不是数组。
+    if (!n.tls.pinned_cert_sha256.empty()) {
+      tls["pinnedPeerCertSha256"] = n.tls.pinned_cert_sha256;
+    } else if (!n.tls.fingerprint.empty()) {
+      tls["pinnedPeerCertSha256"] = n.tls.fingerprint;
+    } else if (n.tls.insecure && !sni.empty()) {
       tls["verifyPeerCertByName"] = sni;
     }
     if (!n.tls.alpn.empty()) tls["alpn"] = n.tls.alpn;
     if (!n.tls.client_fingerprint.empty()) tls["fingerprint"] = n.tls.client_fingerprint;
-    if (!n.tls.fingerprint.empty()) {
-      tls["pinnedPeerCertSha256"] = Json::array({n.tls.fingerprint});
-    }
     stream["tlsSettings"] = std::move(tls);
   } else {
     stream["security"] = "none";
@@ -228,22 +240,38 @@ Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
 
 }  // namespace
 
-Result<std::string> emit_xray(const NodeList& nodes, const EmitOptions& opts) {
+Result<std::string> emit_xray(const NodeList& nodes, const EmitOptions& opts,
+                              std::vector<std::string>* warnings) {
   const NodeList prepared = prepare_nodes(nodes, opts);
   if (prepared.empty()) return fail("去重后没有可输出的节点");
 
-  std::vector<std::string> warnings;
+  std::vector<std::string> skipped;
   Json outbounds = Json::array();
   Json node_tags = Json::array();
+  std::size_t need_pin = 0;
   for (const auto& node : prepared) {
-    Json out = build_outbound(node, warnings);
+    Json out = build_outbound(node, skipped);
     if (out.is_null()) continue;
+    if (node.tls.insecure && !node.tls.reality && node.tls.pinned_cert_sha256.empty() &&
+        node.is_tls()) {
+      ++need_pin;
+    }
     node_tags.push_back(node.name);
     outbounds.push_back(std::move(out));
   }
+  if (warnings != nullptr) {
+    for (const auto& w : skipped) warnings->push_back(w);
+    if (need_pin > 0) {
+      warnings->push_back(
+          "有 " + std::to_string(need_pin) +
+          " 个节点要求跳过证书校验但没有证书指纹：Xray 25+ 已移除 allowInsecure，这里只能退回 "
+          "verifyPeerCertByName（仍要求证书链可信且名字匹配，机场节点几乎都对不上，"
+          "客户端会表现为全部 -1）→ 加 --probe-cert 探测对端证书指纹即可放行");
+    }
+  }
   if (outbounds.empty()) {
     const std::string detail =
-        warnings.empty() ? std::string() : ("\n  - " + codec::join(warnings, "\n  - "));
+        skipped.empty() ? std::string() : ("\n  - " + codec::join(skipped, "\n  - "));
     return fail("没有任何节点能转换为 Xray 配置" + detail);
   }
 

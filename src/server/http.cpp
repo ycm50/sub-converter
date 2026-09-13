@@ -484,8 +484,6 @@ std::string display_host(const std::string& listen) {
 void open_browser(const std::string& url) {
 #if defined(_WIN32)
   const std::string command = "start \"\" \"" + url + "\"";
-#elif defined(__APPLE__)
-  const std::string command = "open \"" + url + "\" >/dev/null 2>&1";
 #else
   const std::string command = "xdg-open \"" + url + "\" >/dev/null 2>&1";
 #endif

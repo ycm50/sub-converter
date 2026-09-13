@@ -5,6 +5,7 @@
 #include <map>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "subconv/error.hpp"
 #include "subconv/types.hpp"
@@ -92,6 +93,21 @@ Result<Subscription> load_source(const std::string& source, const LoadOptions& o
 
 /// 是否为 http(s) URL。
 [[nodiscard]] bool is_url(std::string_view source);
+
+// ---------------------------------------------------------------------------
+// 证书指纹探测（--probe-cert）
+// ---------------------------------------------------------------------------
+/// 连接 host:port（SNI 用 sni，空则用 host）取对端叶子证书，返回 SHA256 指纹
+/// （冒号分隔的大写十六进制，Xray `pinnedPeerCertSha256` / v2rayN `pcs` 的格式）。
+/// 校验被有意跳过：探测的目的就是"证书不可信/名字不符"的节点也能拿到指纹。
+[[nodiscard]] Result<std::string> probe_peer_cert_sha256(std::string_view host, uint16_t port,
+                                                       std::string_view sni,
+                                                       int timeout_seconds = 5);
+
+/// 为「需要跳过证书校验」的节点补齐 `pinned_cert_sha256`（含 xhttp 下载侧），就地修改 nodes。
+/// 返回实际探测成功的次数；warnings 非空时记录失败原因（不改变 nodes 的其余字段）。
+std::size_t probe_node_certificates(NodeList& nodes, int timeout_seconds = 5,
+                                    std::vector<std::string>* warnings = nullptr);
 
 }  // namespace subconv::fetch
 

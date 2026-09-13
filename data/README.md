@@ -12,7 +12,11 @@
 
 > `web/index.html` 是唯一有运行时作用的内置资源：CMake 在配置阶段把它读成 C++ 原始字符串
 > 写进 `build/generated/web_ui.hpp`，所以 Web UI 不依赖任何运行时路径，拷到哪都能跑。
-> 改动该文件会触发 CMake 重新配置（`CMAKE_CONFIGURE_DEPENDS`）。
+> 改动该文件会触发 CMake 重新配置（`CMAKE_CONFIGURE_DEPENDS`）；**已经在跑的 `serve` 也必须重启**
+> 才会换成新界面（没有热更新）。
+> 输入框的切分逻辑 `splitInput` 有独立回归检查：`node tools/check-web-input.mjs`
+> （直接用正则从本文件抠出该函数执行）—— 它曾经把每行 `trim` 之后拼回内容，于是粘贴进来的
+> Clash YAML 整段丢缩进、稳定报 `yaml-cpp: error at line N: end of map not found`。
 
 **分流规则集与 DNS 预设没有放到这里**，而是内建在 src/emit/rulesets.cpp 与 src/emit/dns.cpp 的目录表里。原因：
 

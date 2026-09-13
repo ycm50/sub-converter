@@ -41,7 +41,9 @@ std::string fnv1a_hex(std::string_view data) {
     hash ^= static_cast<unsigned char>(ch);
     hash *= 1099511628211ULL;
   }
-  char buffer[32];
+  // 16 + 16 个十六进制字符 + '\0' = 33，缓冲区必须比 32 大，否则最后一位会被截断
+  // （GCC 的 -Wformat-truncation 也会直接报出来）
+  char buffer[40];
   std::snprintf(buffer, sizeof(buffer), "%016llx%016zx",
                 static_cast<unsigned long long>(hash), data.size());
   return buffer;
@@ -66,11 +68,23 @@ ContentKind sniff_content(std::string_view body, std::string_view content_type) 
   if (s.empty()) return ContentKind::Unknown;
 
   const char first = s.front();
-  if (first == '{' || first == '[') return ContentKind::JsonConfig;
   if (first == '<') return ContentKind::Html;
 
-  // 前 4KB 足够判断结构
-  const std::string head = codec::to_lower(s.substr(0, std::min<std::size_t>(s.size(), 4096)));
+  // 判断窗口给到 256KB：JSON 版 Clash 配置的 proxies 段可能排在几千字节的前置配置之后
+  // （BPB 面板 `?app=clash` 返回的就是这种，content-type 还是 application/json）。
+  const std::string head = codec::to_lower(s.substr(0, std::min<std::size_t>(s.size(), 262144)));
+
+  if (first == '{' || first == '[') {
+    // JSON 是 YAML 的子集，mihomo 直接吃 JSON 版 Clash 配置。
+    // 只见 Clash 专有键就交给 Clash 解析器；sing-box / Xray / v2ray 仍按 JSON 配置报错。
+    if (head.find("\"proxies\"") != std::string::npos ||
+        head.find("\"proxy-groups\"") != std::string::npos ||
+        head.find("\"proxy-providers\"") != std::string::npos ||
+        head.find("\"mixed-port\"") != std::string::npos) {
+      return ContentKind::ClashYaml;
+    }
+    return ContentKind::JsonConfig;
+  }
 
   if (head.find("<html") != std::string::npos || head.find("<!doctype") != std::string::npos) {
     return ContentKind::Html;

@@ -120,6 +120,15 @@ Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
     return Json();
   };
 
+  // sing-box 的 V2Ray 传输是枚举死的（option/v2ray_transport.go 的
+  // enum:"http,ws,quic,grpc,httpupgrade"），根本没有 xhttp：
+  //   $ sing-box check → outbounds[0].transport: unknown transport type: xhttp
+  // 与其产出「缺了传输层」的 tcp 配置（能过 check，但连不上），不如明确跳过并告知。
+  if (n.network == Network::Xhttp) {
+    return reject("没有 xhttp 传输（官方只支持 http/ws/quic/grpc/httpupgrade）；"
+                  "该节点请用 -t clash 或 -t xray");
+  }
+
   Json out = Json::object();
   out["tag"] = n.name;
 
@@ -240,22 +249,26 @@ Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
 
 }  // namespace
 
-Result<std::string> emit_singbox(const NodeList& nodes, const EmitOptions& opts) {
+Result<std::string> emit_singbox(const NodeList& nodes, const EmitOptions& opts,
+                                 std::vector<std::string>* warnings) {
   const NodeList prepared = prepare_nodes(nodes, opts);
   if (prepared.empty()) return fail("去重后没有可输出的节点");
 
-  std::vector<std::string> warnings;
+  std::vector<std::string> skipped;
   Json node_outbounds = Json::array();
   Json node_tags = Json::array();
   for (const auto& node : prepared) {
-    Json out = build_outbound(node, warnings);
+    Json out = build_outbound(node, skipped);
     if (out.is_null()) continue;
     node_tags.push_back(node.name);
     node_outbounds.push_back(std::move(out));
   }
+  if (warnings != nullptr) {
+    for (const auto& w : skipped) warnings->push_back(w);
+  }
   if (node_outbounds.empty()) {
     const std::string detail =
-        warnings.empty() ? std::string() : ("\n  - " + codec::join(warnings, "\n  - "));
+        skipped.empty() ? std::string() : ("\n  - " + codec::join(skipped, "\n  - "));
     return fail("没有任何节点能转换为 sing-box 配置" + detail);
   }
 

@@ -73,6 +73,10 @@ function Get-Segment([string]$line) {
 $rawLines = Get-Content -LiteralPath $Path
 $lines = @($rawLines | Where-Object { $_.Trim() -ne '' })
 
+# v2rayN Global.XhttpMode：只有落在白名单里的 mode 才会写进链接/配置，
+# 其余值在 BaseFmt.ToUriQuery 与 V2rayOutboundService 里会被静默丢掉。
+$xhttpModes = @('auto', 'packet-up', 'stream-up', 'stream-one')
+
 $v2rayNOk = 0
 $v2rayNGFail = 0
 $problems = New-Object System.Collections.Generic.List[string]
@@ -80,6 +84,8 @@ $seenIndexId = @{}
 $duplicateIndexId = 0
 $typeHistogram = @{}
 $coreTypeSeen = @{}
+$xhttpCount = 0
+$xhttpWithDownload = 0
 
 foreach ($line in $lines) {
   $short = $line.Substring(0, [Math]::Min(60, $line.Length))
@@ -155,6 +161,32 @@ foreach ($line in $lines) {
       if ($null -ne $item.PSObject.Properties['CoreType'] -and $null -ne $item.CoreType) {
         $coreTypeSeen[[int]$item.CoreType] = $true
       }
+
+      # ---- XHTTP 专项：mode 白名单 + XhttpExtra 必须是合法 JSON ----
+      # v2rayN 的 InnerFmt/V2rayOutboundService 会把 XhttpMode 塞进 mode、把 XhttpExtra
+      # 解析成对象后写进 xhttpSettings.extra；Xray 拿到非 JSON 的 extra 会直接拒绝加载。
+      if ([string]$item.Network -eq 'xhttp') {
+        $xhttpCount++
+        $te = $item.TransportExtraObj
+        if ($null -eq $te) {
+          $problems.Add("Network=xhttp 但没有 TransportExtraObj，XhttpMode/XhttpExtra 全丢：$short…")
+        } else {
+          $mode = [string]$te.XhttpMode
+          if ($mode -ne '' -and $xhttpModes -notcontains $mode) {
+            $problems.Add("XhttpMode='$mode' 不在 v2rayN 白名单（$($xhttpModes -join '/')）内，会被丢弃：$short…")
+          }
+          $extra = [string]$te.XhttpExtra
+          if ($extra -ne '') {
+            $parsedExtra = $null
+            try { $parsedExtra = $extra | ConvertFrom-Json } catch { }
+            if ($null -eq $parsedExtra) {
+              $problems.Add("XhttpExtra 不是合法 JSON，Xray 会拒绝加载：$short…")
+            } elseif ($null -ne $parsedExtra.PSObject.Properties['downloadSettings']) {
+              $xhttpWithDownload++
+            }
+          }
+        }
+      }
     }
   }
 }
@@ -172,6 +204,9 @@ if ($coreTypeSeen.Count -gt 0) {
   Write-Host ("   CoreType 出现: {0}" -f (($coreTypeSeen.Keys | Sort-Object) -join ', '))
 } else {
   Write-Host "   CoreType 出现: 无（合法）"
+}
+if ($xhttpCount -gt 0) {
+  Write-Host ("   XHTTP 节点   : {0}（其中 {1} 个带 downloadSettings）" -f $xhttpCount, $xhttpWithDownload)
 }
 
 if ($LegacyNoSegment) {

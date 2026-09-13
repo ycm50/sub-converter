@@ -24,7 +24,7 @@ std::string config_header(std::string_view target, std::size_t node_count,
   line.append(target);
   line += " | nodes=" + std::to_string(node_count);
   if (!name.empty()) line += " | name=" + std::string(name);
-  line += "\n# 由 subconv 自动生成；规则与分组模板见 data/\n";
+  line += "\n# 由 subconv 自动生成；分组与规则集内建于程序（--list-rulesets / --list-dns）\n";
   return line;
 }
 
@@ -127,8 +127,8 @@ Result<std::string> emit_config(const NodeList& nodes, const EmitOptions& opts,
   }
 
   if (target == "clash") return emit_clash(nodes, opts, warnings);
-  if (target == "xray") return emit_xray(nodes, opts);
-  if (target == "singbox") return emit_singbox(nodes, opts);
+  if (target == "xray") return emit_xray(nodes, opts, warnings);
+  if (target == "singbox") return emit_singbox(nodes, opts, warnings);
   if (target == "links") return emit_sharelinks(nodes, opts, ShareMode::Links, warnings);
   if (target == "base64") return emit_sharelinks(nodes, opts, ShareMode::Base64, warnings);
   if (target == "v2rayn") return emit_sharelinks(nodes, opts, ShareMode::V2rayN, warnings);

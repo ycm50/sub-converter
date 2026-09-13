@@ -120,6 +120,9 @@ Result<ConvertRequest> request_from_query(std::string_view query, const ServerOp
     req.emit.dns = std::move(*dns);
   }
   req.emit.ipv6 = flag(params, "ipv6", req.emit.ipv6);
+  req.emit.probe_cert = flag(params, "probe_cert", req.emit.probe_cert);
+  req.emit.probe_cert_timeout_seconds = static_cast<int>(
+      long_param(params, "probe_cert_timeout", req.emit.probe_cert_timeout_seconds));
 
   req.load.http.proxy = text_param(params, "proxy", req.load.http.proxy);
   req.load.http.user_agent = text_param(params, "ua", req.load.http.user_agent);
@@ -217,6 +220,9 @@ Result<ConvertRequest> request_from_json(std::string_view body, const ServerOpti
     req.emit.rule_sets = get_string_list(options, "rulesets", req.emit.rule_sets);
     req.emit.dns = get_string_list(options, "dns", req.emit.dns);
     req.emit.ipv6 = get_bool(options, "ipv6", req.emit.ipv6);
+    req.emit.probe_cert = get_bool(options, "probe_cert", req.emit.probe_cert);
+    req.emit.probe_cert_timeout_seconds = static_cast<int>(
+        get_long(options, "probe_cert_timeout", req.emit.probe_cert_timeout_seconds));
   }
 
   if (const auto it = root.find("fetch"); it != root.end() && it->is_object()) {

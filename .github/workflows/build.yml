@@ -1,0 +1,553 @@
+name: build
+
+# 什么时候跑：
+#   * push main             → 全平台编译 + 单元测试 + 上传 artifact（不发 Release）
+#   * pull request          → 只跑 linux-native 和 windows 两组（几分钟），
+#                             linux-qemu / termux 这些重的任务直接跳过
+#   * push v* / 1.0 这类标签  → 跑全部平台，打成压缩包并发 GitHub Release。
+#   * 手动 workflow_dispatch → **自动递增版本号并发布**（v1.0 → … → v1.9 → v2.0 → … → v2.9 → v3.0），
+#                              也可以填 tag 手动指定。
+#
+# 注意：job 级的 if 里**不能**用 matrix.*（那里没有这个上下文）。
+# 所以「PR 少跑几个平台」是靠给重任务加 `if: github.event_name != 'pull_request'` 实现的，
+# 而不是按架构挑矩阵条目。
+#
+# 覆盖的平台（产物名 = subconv-<tag>-<平台>.<后缀>）：
+#   linux-x86_64 / aarch64            Ubuntu 22.04 原生（基线 glibc 2.35）
+#   linux-armv7l / i686               Debian 12 容器 + QEMU 模拟（基线 glibc 2.36）
+#   linux-riscv64                     Ubuntu 24.04 容器 + QEMU 模拟（基线 glibc 2.39）
+#                                     debian:bookworm 的官方镜像没有 riscv64；
+#                                     ubuntu:24.04 有，而且 GCC 13 满足 C++23
+#   windows-x86_64 / aarch64          Linux 上用 llvm-mingw 交叉编译（UCRT，单个静态 exe）
+#   termux-aarch64 / arm              termux/termux-docker 官方工具链（bionic + libc++）
+#
+# 已按需舍去：linux-ppc64le / linux-s390x / windows-i686 / termux-i686 / termux-x86_64
+# （Termux 只保留手机上的两个真·架构 aarch64 / arm，386 与 amd64 镜像没必要编）。
+# 注意舍掉 s390x 之后**没有大端平台**了，字节序相关的回归不再有 CI 覆盖。
+on:
+  push:
+    branches: [main]
+    tags: ['v*', '[0-9]*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '指定 tag（留空 = 自动递增：v1.0 → … → v1.9 → v2.0 → … → v2.9）'
+        required: false
+        default: ''
+        type: string
+      bump:
+        description: 'tag 留空时的递增方式'
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - major
+
+# 默认最小权限；只有 release job 需要写内容（建 tag + 发 Release）
+permissions:
+  contents: read
+
+concurrency:
+  # 同一分支/标签上重复触发时，取消上一次没跑完的（发布用的 tag 不能取消）
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 版本号：按 v1.0 → … → v1.9 → v2.0 → … → v2.9 → v3.0 自动递增（次版本只到 9）
+  # ---------------------------------------------------------------------------
+  version:
+    name: 计算版本号
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.calc.outputs.tag }}
+      version: ${{ steps.calc.outputs.version }}
+      publish: ${{ steps.calc.outputs.publish }}
+    steps:
+      - name: "检出（要 tag 列表，fetch-depth: 0）"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 算出版本
+        id: calc
+        shell: pwsh
+        run: |
+          $event     = '${{ github.event_name }}'
+          $isTagPush = '${{ github.ref }}'.StartsWith('refs/tags/')
+          $inputTag  = '${{ inputs.tag }}'.Trim()
+          $bump      = '${{ inputs.bump }}'.Trim()
+
+          # 已有版本号形如 1.0 / v1.9：取最大者，次版本 < 9 就 +1，否则主版本 +1、次版本归 0
+          $versions = @()
+          foreach ($t in @(git tag --list)) {
+            if ($t -match '^v?(\d+)\.(\d+)$') {
+              $versions += [pscustomobject]@{ Major = [int]$Matches[1]; Minor = [int]$Matches[2] }
+            }
+          }
+          $known = @($versions | ForEach-Object { "$($_.Major).$($_.Minor)" } | Sort-Object -Unique)
+          Write-Host "已存在的版本 tag：$(if ($known.Count -gt 0) { $known -join ', ' } else { '（无）' })"
+
+          if ($isTagPush) {
+            # 手动打的 tag 原样用（v1.2 / 1.2 都接受）——Release 就挂在这个已有 tag 上，不另建一个
+            $tag = '${{ github.ref_name }}'
+            $publish = 'true'
+          } elseif ($event -eq 'workflow_dispatch') {
+            if ($inputTag) {
+              $tag = $inputTag
+              if ($tag -notmatch '^v') { $tag = "v$tag" }
+            } elseif ($versions.Count -eq 0) {
+              $tag = 'v1.0'
+            } else {
+              $latest = $versions | Sort-Object Major, Minor | Select-Object -Last 1
+              if ($bump -eq 'major' -or $latest.Minor -ge 9) {
+                $tag = "v$($latest.Major + 1).0"
+              } else {
+                $tag = "v$($latest.Major).$($latest.Minor + 1)"
+              }
+            }
+            $publish = 'true'
+          } else {
+            # 普通分支/PR：只编译不发版，版本号带 commit 便于分辨
+            $tag = ''
+            $publish = 'false'
+          }
+
+          if ($tag) { $version = $tag.TrimStart('v') } else { $version = "dev-$('${{ github.sha }}'.Substring(0, 7))" }
+          Write-Host "::notice::版本 tag = '$tag'，二进制版本号 = '$version'，是否发布 = $publish"
+          "tag=$tag"         >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "publish=$publish" >> $env:GITHUB_OUTPUT
+
+  # ---------------------------------------------------------------------------
+  # Linux x86_64 / aarch64：原生构建（GitHub 有 arm64 runner，不用模拟，最快也最可信）
+  # ---------------------------------------------------------------------------
+  linux-native:
+    name: Linux ${{ matrix.arch }}
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu-22.04 的默认 g++ 是 11，没有 <expected>，所以要显式用 g++-12。
+          # 选 22.04 而不是 24.04 是为了把 glibc 基线压到 2.35，老一点的发行版也能跑。
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 安装依赖（g++-12 + libcurl + OpenSSL）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config ca-certificates \
+            gcc-12 g++-12 libcurl4-openssl-dev libssl-dev
+
+      - name: 编译（Release，版本号来自 tag）
+        env:
+          CC: gcc-12
+          CXX: g++-12
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSUBCONV_VERSION:STRING="${{ needs.version.outputs.version }}" \
+            -DSUBCONV_VENDOR_YAMLCPP=ON \
+            -DSUBCONV_STATIC_RUNTIME=ON
+          cmake --build build
+          ./build/subconv version
+
+      - name: 单元测试
+        run: ./build/subconv_tests
+
+      # 输入框切分回归：曾经把每行 trim 后拼回去，整段 YAML 丢缩进
+      # → yaml-cpp 报 "end of map not found"（见 tools/check-web-input.mjs）
+      - name: 检查 Web UI 输入切分
+        if: matrix.arch == 'x86_64'
+        run: node tools/check-web-input.mjs
+
+      - name: 打包 tar.gz
+        env:
+          SUBCONV_TAG: ${{ needs.version.outputs.tag || needs.version.outputs.version }}
+          SUBCONV_DEPS: libcurl4 libssl3
+        run: bash tools/package.sh "linux-${{ matrix.arch }}"
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: subconv-linux-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Linux 其它架构：官方基础镜像 + QEMU，在容器里做「原生」构建
+  # （apt 直接给目标架构的 libcurl/openssl，比手工交叉编译一套依赖省事得多）
+  #
+  # 镜像按架构挑：debian:bookworm 的官方镜像没有 riscv64（只有
+  # 386/amd64/arm/v7/arm64/ppc64le），riscv64 只能用 ubuntu:24.04。
+  # 之前一律用 bookworm，riscv64 直接死在
+  # 「no matching manifest for linux/riscv64 in the manifest list entries」。
+  # 所以只把它换到 ubuntu:24.04；另外两个留在 bookworm 上（那两个实测已经能过）。
+  # 两个镜像的默认 GCC 分别是 12 / 13，都满足 C++23 std::expected 的要求。
+  # ---------------------------------------------------------------------------
+  linux-qemu:
+    name: Linux ${{ matrix.arch }}（QEMU）
+    needs: version
+    runs-on: ubuntu-22.04
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # deps 只写进包里的 HOW-TO-RUN.txt 当提示用；Ubuntu 24.04 那套库名带了 t64 后缀
+          # （64 位 time_t 迁移），Debian 12 那套没有。
+          - arch: armv7l
+            platform: linux/arm/v7
+            image: debian:bookworm
+            deps: libcurl4 libssl3
+          - arch: i686
+            platform: linux/386
+            image: debian:bookworm
+            deps: libcurl4 libssl3
+          - arch: riscv64
+            platform: linux/riscv64
+            image: ubuntu:24.04
+            deps: libcurl4t64 libssl3t64
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 准备 QEMU（binfmt_misc）
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
+
+      - name: 容器内编译 + 测试 + 打包
+        env:
+          SUBCONV_VERSION: ${{ needs.version.outputs.version }}
+          SUBCONV_TAG: ${{ needs.version.outputs.tag || needs.version.outputs.version }}
+          TARGET_PLATFORM: ${{ matrix.platform }}
+          TARGET_IMAGE: ${{ matrix.image }}
+          TARGET_DEPS: ${{ matrix.deps }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          docker run --rm \
+            --platform "$TARGET_PLATFORM" \
+            -v "$PWD:/src" -w /src \
+            -e SUBCONV_VERSION -e SUBCONV_TAG -e TARGET_DEPS -e ARCH \
+            "$TARGET_IMAGE" bash -euxc '
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends \
+                build-essential cmake ninja-build pkg-config ca-certificates \
+                libcurl4-openssl-dev libssl-dev
+              cmake -S . -B build -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DSUBCONV_VERSION:STRING="$SUBCONV_VERSION" \
+                -DSUBCONV_VENDOR_YAMLCPP=ON \
+                -DSUBCONV_STATIC_RUNTIME=ON
+              cmake --build build
+              ./build/subconv version
+              ./build/subconv_tests
+              SUBCONV_TAG="$SUBCONV_TAG" SUBCONV_DEPS="$TARGET_DEPS" \
+                bash tools/package.sh "linux-$ARCH"
+            '
+
+      - name: 把容器里 root 生成的文件交回 runner
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" build dist 2>/dev/null || true
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: subconv-linux-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Windows：在 Linux 上用 llvm-mingw 交叉编译（不再需要 MSYS2 / Windows runner）
+  #   x86_64  → x86_64-w64-mingw32
+  #   aarch64 → aarch64-w64-mingw32
+  #
+  # 一份 llvm-mingw（UCRT）就带齐两个目标；麻烦的是 Debian/Ubuntu 没有给 mingw
+  # 预编译的 libcurl / OpenSSL，所以这两个静态库在 CI 里现编一份（下面带缓存，
+  # 命中时这一步只有几十秒）。产物是**单个静态 exe**：不用再收集一堆 DLL。
+  # ---------------------------------------------------------------------------
+  windows:
+    name: Windows ${{ matrix.arch }}（交叉编译）
+    needs: version
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            triple: x86_64-w64-mingw32
+            coff: coff-x86-64
+          - arch: aarch64
+            triple: aarch64-w64-mingw32
+            coff: coff-arm64
+    env:
+      SUBCONV_LLVM_MINGW_VERSION: '20260908'
+      SUBCONV_OPENSSL_VERSION: '3.5.1'
+      SUBCONV_CURL_VERSION: '8.15.0'
+      CROSS_CACHE: ${{ github.workspace }}/.cache
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 安装构建工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build zip perl ca-certificates
+
+      # llvm-mingw（84 MB）和两个依赖的安装前缀一起缓存：
+      # 命中时依赖那一步直接跳过（脚本看到 libssl.a/libcurl.a 就返回），几秒钟恢复；
+      # key 里带上依赖脚本的哈希，改了配置（编译选项、OpenSSL 目标）就会自动重编，
+      # 不会把旧配置的产物当成新的用。源码目录（win-deps-src，解压+编译后好几个 GB）
+      # 不进缓存：依赖命中时用不到它，没命中时 CI 直连 GitHub 下载也很快。
+      - name: 缓存 llvm-mingw 与静态依赖
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CROSS_CACHE }}/llvm-mingw
+            ${{ env.CROSS_CACHE }}/win-deps
+          key: win-cross-${{ matrix.triple }}-llvm${{ env.SUBCONV_LLVM_MINGW_VERSION }}-ssl${{ env.SUBCONV_OPENSSL_VERSION }}-curl${{ env.SUBCONV_CURL_VERSION }}-${{ hashFiles('tools/build-windows-deps.sh', 'tools/mingw-w64-toolchain.cmake') }}
+
+      - name: 准备 llvm-mingw（UCRT，含 x86_64 + aarch64）
+        run: bash tools/setup-llvm-mingw.sh "$CROSS_CACHE/llvm-mingw"
+
+      - name: 交叉编译静态 OpenSSL + libcurl
+        run: |
+          bash tools/build-windows-deps.sh "${{ matrix.triple }}" \
+            "$CROSS_CACHE/llvm-mingw" "$CROSS_CACHE/win-deps/${{ matrix.arch }}" \
+            "$CROSS_CACHE/win-deps-src"
+
+      - name: 编译（Release，版本号来自 tag）
+        run: |
+          export PATH="$CROSS_CACHE/llvm-mingw/bin:$PATH"
+          cmake -S . -B "build-win-${{ matrix.arch }}" -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=tools/mingw-w64-toolchain.cmake \
+            -DSUBCONV_MINGW_TRIPLE="${{ matrix.triple }}" \
+            -DSUBCONV_WINDOWS_SYSROOT="$CROSS_CACHE/win-deps/${{ matrix.arch }}" \
+            -DSUBCONV_VERSION:STRING="${{ needs.version.outputs.version }}" \
+            -DSUBCONV_VENDOR_YAMLCPP=ON
+          cmake --build "build-win-${{ matrix.arch }}"
+          exe="build-win-${{ matrix.arch }}/subconv.exe"
+          # 用不带前缀的 llvm-objdump，别用 llvm-mingw 里 <三元组>-objdump 那几个包装器：
+          # 包装器会把格式名改写成 libtool 认识的老名字（COFF-x86-64 → pe-x86-64、
+          # COFF-ARM* → pe-arm-wince），而 llvm-objdump 报的 coff-x86-64 / coff-arm64
+          # 才是能拿来断言架构的。
+          od="$CROSS_CACHE/llvm-mingw/bin/llvm-objdump"
+          echo "== exe 的架构 =="
+          "$od" -f "$exe" | sed -n '1,3p'
+          # 断言架构：万一哪天三元组/工具链串了，也不至于把 x86_64 的产物当 aarch64 发出去
+          "$od" -f "$exe" | grep -q "${{ matrix.coff }}" \
+            || { echo "产物架构不对：期望 ${{ matrix.coff }}"; exit 1; }
+          echo "== exe 依赖的 DLL（静态链接的话只有系统那几个）=="
+          "$od" -p "$exe" | grep 'DLL Name'
+
+      # 这里**不跑 Windows 产物**：CI 上不再装 Wine，两个架构都只保证
+      # 「编得出来 + 链接通过 + 架构断言正确」。要真跑，在 Windows 机器上
+      # 直接执行 subconv.exe / subconv_tests.exe 即可（本地构建见 build.ps1）。
+
+      - name: 打包 zip
+        env:
+          SUBCONV_TAG: ${{ needs.version.outputs.tag || needs.version.outputs.version }}
+        run: bash tools/package-windows.sh "windows-${{ matrix.arch }}" "build-win-${{ matrix.arch }}"
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: subconv-windows-${{ matrix.arch }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Termux：用官方 termux/termux-docker 镜像，里面 pkg 装的就是 Termux 自家的
+  # bionic + libc++ 工具链，编出来的二进制能直接在手机上跑。
+  # ---------------------------------------------------------------------------
+  termux:
+    name: Termux ${{ matrix.arch }}
+    needs: version
+    runs-on: ubuntu-22.04
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            image_tag: aarch64
+            platform: linux/arm64
+          - arch: arm
+            image_tag: arm
+            platform: linux/arm/v7
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 准备 QEMU（Termux 只有 arm 系镜像，全靠模拟）
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
+
+      # 镜像里的 system 用户 UID 与 runner 用户不同，先放开工作区写权限，
+      # 否则容器内没法写 build/ dist/
+      - name: 放开工作区写权限
+        run: chmod -R a+rwX .
+
+      - name: 容器内编译 + 测试 + 打包
+        env:
+          SUBCONV_VERSION: ${{ needs.version.outputs.version }}
+          SUBCONV_TAG: ${{ needs.version.outputs.tag || needs.version.outputs.version }}
+          TERMUX_IMAGE: termux/termux-docker:${{ matrix.image_tag }}
+          TARGET_PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          # --privileged：Termux 的 arm/386 容器用 qemu 跑时 personality 系统调用会被
+          # seccomp 拦掉，官方文档给的办法就是放开（见 termux/termux-docker README）。
+          #
+          # 注意：不能用 `docker run -e VAR` 传变量。termux-docker 的 entrypoint 在
+          # root 身份下会走 `su ... env -i`，把整个环境清空后只回填白名单里的
+          # ANDROID_DATA/HOME/PATH/PREFIX/TMPDIR/... —— 自己 -e 进去的变量在容器里根本
+          # 不存在，脚本里一引用就是 "SUBCONV_VERSION: unbound variable"（一开始四个架构
+          # 全挂在这儿，只留 arm 系之后同样适用）。这里改成把值当**位置参数**递进去：entrypoint 最后是 `"$@"`，
+          # 参数原样透传，bash 侧用 $1 $2 $3 接。
+          docker run --rm --privileged \
+            --platform "$TARGET_PLATFORM" \
+            -v "$PWD:/src" -w /src \
+            "$TERMUX_IMAGE" bash -lc '
+              set -eux
+              VERSION="${1:-}"; TAG="${2:-}"; ARCH_NAME="${3:-}"
+              if [ -z "$VERSION" ] || [ -z "$TAG" ] || [ -z "$ARCH_NAME" ]; then
+                echo "!! 容器里没收到参数（VERSION=[$VERSION] TAG=[$TAG] ARCH=[$ARCH_NAME]）" >&2
+                exit 1
+              fi
+              pkg update -y
+              pkg install -y clang cmake ninja pkg-config libcurl openssl ca-certificates
+              cmake -S . -B build -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DSUBCONV_VERSION:STRING="$VERSION" \
+                -DSUBCONV_VENDOR_YAMLCPP=ON
+              cmake --build build
+              ./build/subconv version
+              ./build/subconv_tests
+              SUBCONV_TAG="$TAG" \
+                SUBCONV_DEPS="libc++ libcurl openssl" \
+                bash tools/package.sh "termux-$ARCH_NAME"
+            ' -- "$SUBCONV_VERSION" "$SUBCONV_TAG" "$ARCH"
+
+      - name: 把容器里生成的文件交回 runner
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" build dist 2>/dev/null || true
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: subconv-termux-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 发布：Tag 已在 build 阶段打进二进制，这里只负责建 tag + 挂所有平台的包
+  # ---------------------------------------------------------------------------
+  release:
+    name: 发布 Release
+    needs: [version, linux-native, linux-qemu, windows, termux]
+    # 只要有一个平台的产物做出来了就发布：QEMU/Termux 这类模拟任务偶尔会因为
+    # 超时或上游源抖动失败，不该把已经编好的十几个平台一起拖住。
+    # 用 >- 折叠成单行：如果表达式里带换行，各版本 runner 的解析行为不一定一致。
+    if: >-
+      always() && !cancelled() &&
+      needs.version.outputs.publish == 'true' &&
+      (needs.linux-native.result == 'success' || needs.linux-qemu.result == 'success' ||
+       needs.windows.result == 'success' || needs.termux.result == 'success')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: 下载所有平台产物
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: subconv-*
+          merge-multiple: true
+          path: dist
+
+      - name: 清点产物 + 生成校验和
+        id: collect
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ls -l dist
+          files=$(ls dist)
+          if [ -z "$files" ]; then
+            echo "any=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::没有任何平台产物，跳过发布"
+            exit 0
+          fi
+          ( cd dist && sha256sum $(ls) > SHA256SUMS.txt )
+          echo "any=true" >> "$GITHUB_OUTPUT"
+
+          # 缺了哪个平台要显式说出来，别让人以为「全平台都发了」
+          expected="linux-x86_64 linux-aarch64 linux-armv7l linux-i686 linux-riscv64 windows-x86_64 windows-aarch64 termux-aarch64 termux-arm"
+          missing=""
+          for p in $expected; do
+            ls dist | grep -q -- "-$p\." || missing="$missing $p"
+          done
+          if [ -n "$missing" ]; then
+            echo "::warning::本次没有产出的平台：$missing"
+          fi
+
+          {
+            echo "### 本次发布包含的产物"
+            echo
+            echo '```'
+            ls -l dist
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 发布（自动建 tag）
+        if: steps.collect.outputs.any == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          files: dist/*
+          generate_release_notes: true
+          append_body: true
+          body: |
+            各平台都是同一份源码构建，二进制内部版本号 = `${{ needs.version.outputs.version }}`。
+            每个包里都有 README.md 和 HOW-TO-RUN.txt，解压即用。
+
+            | 平台 | 运行环境 / 工具链 | 需要的运行库 |
+            |---|---|---|
+            | `linux-x86_64` | Ubuntu 22.04 / GCC 12 | glibc ≥ 2.35，libcurl4、libssl3 |
+            | `linux-aarch64` | Ubuntu 22.04 arm64 / GCC 12 | glibc ≥ 2.35，libcurl4、libssl3 |
+            | `linux-armv7l` `i686` | Debian 12 容器 + QEMU / GCC 12 | glibc ≥ 2.36，libcurl4、libssl3 |
+            | `linux-riscv64` | Ubuntu 24.04 容器 + QEMU / GCC 13 | glibc ≥ 2.39，libcurl4t64、libssl3t64 |
+            | `windows-x86_64` | Linux + llvm-mingw 交叉编译（UCRT / x86_64） | 无（单个静态 exe） |
+            | `windows-aarch64` | 同上（`aarch64-w64-mingw32`） | 无 |
+            | `termux-aarch64` `termux-arm` | Termux 官方工具链（bionic + libc++） | `pkg install libc++ libcurl openssl` |
+
+            Linux 包里的 yaml-cpp 是**静态内置**的，所以不依赖目标机上的 libyaml-cpp
+            （Ubuntu 22.04 是 0.7、24.04 是 0.8，动态链接必然有一头起不来）。
+
+            跑之前建议先自检：
+
+            ```bash
+            ./subconv version        # 看 libcurl / OpenSSL / yaml-cpp 哪个生效了
+            ./subconv --help
+            ```
+
+            订阅里是机场常见的 `network: xhttp`，且要转给 Xray 系客户端（v2rayN / v2rayNG）时，
+            记得加 `--probe-cert` —— 否则「证书与 SNI 对不上」的节点在 Xray 内核里会全部握手失败
+            （客户端表现就是所有节点延迟 `-1`）。原因见 README 的「证书校验」一节。

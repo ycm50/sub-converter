@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "subconv/convert.hpp"
+#include "subconv/json.hpp"
 
 namespace subconv {
 
@@ -20,10 +21,29 @@ namespace subconv {
 // --- 具体目标 ---
 Result<std::string> emit_clash(const NodeList& nodes, const EmitOptions& opts,
                                std::vector<std::string>* warnings = nullptr);
-Result<std::string> emit_xray(const NodeList& nodes, const EmitOptions& opts);
-Result<std::string> emit_singbox(const NodeList& nodes, const EmitOptions& opts);
+Result<std::string> emit_xray(const NodeList& nodes, const EmitOptions& opts,
+                              std::vector<std::string>* warnings = nullptr);
+Result<std::string> emit_singbox(const NodeList& nodes, const EmitOptions& opts,
+                                 std::vector<std::string>* warnings = nullptr);
 
-/// 分享链接的输出形态。
+// --- XHTTP（见 src/emit/xhttp.cpp）---
+
+/// 写进配置的 xhttp mode 是否被内核接受（空串=交给内核默认，算合法）。
+[[nodiscard]] bool xhttp_mode_supported(const std::string& mode);
+
+/// Xray 的 `xhttpSettings.downloadSettings`（StreamConfig 形态）。
+[[nodiscard]] Json xhttp_download_settings_json(const ProxyNode& node);
+
+/// Xray 的 `xhttpSettings`（含 `extra` 透传或离散的 `downloadSettings`）。
+[[nodiscard]] Json xhttp_settings_json(const ProxyNode& node);
+
+/// `extra=` / v2rayN `XhttpExtra` 用的 JSON 对象；没有可表达的高级参数时返回 null。
+[[nodiscard]] Json xhttp_extra_json(const ProxyNode& node);
+
+/// 只有 mihomo 目标要用：raw extra 里存在它表达不了的键（它没有 `extra` 概念）。
+[[nodiscard]] bool xhttp_extra_has_untranslatable(const ProxyNode& node);
+
+/// 分享链接输出形态。
 enum class ShareMode {
   Links,   ///< 每行一条标准分享链接（通用）
   Base64,  ///< 上面那份列表的 base64（v2rayNG 的「订阅」内容）

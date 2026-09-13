@@ -94,6 +94,8 @@ std::optional<Network> network_from_string(std::string_view s) noexcept {
   if (k == "h2" || k == "http") return Network::H2;
   if (k == "quic") return Network::Quic;
   if (k == "kcp" || k == "mkcp") return Network::Kcp;
+  // Xray 25 起把 splithttp 改名 xhttp，两个名字都收
+  if (k == "xhttp" || k == "splithttp") return Network::Xhttp;
   return std::nullopt;
 }
 
@@ -106,6 +108,7 @@ const char* to_string(Network n) noexcept {
     case Network::Http: return "http";
     case Network::Quic: return "quic";
     case Network::Kcp: return "kcp";
+    case Network::Xhttp: return "xhttp";
   }
   return "unknown";
 }

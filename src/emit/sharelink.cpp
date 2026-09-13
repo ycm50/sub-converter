@@ -72,6 +72,7 @@ std::string header_type(const ProxyNode& node) {
 
 std::string transport_host(const ProxyNode& node) {
   if (node.network == Network::Ws) return node.ws.host;
+  if (node.network == Network::Xhttp) return node.xhttp.host;
   if (node.network == Network::H2 || node.network == Network::Http) {
     return codec::join(node.h2.host, ",");
   }
@@ -80,6 +81,7 @@ std::string transport_host(const ProxyNode& node) {
 
 std::string transport_path(const ProxyNode& node) {
   if (node.network == Network::Ws) return node.ws.path;
+  if (node.network == Network::Xhttp) return node.xhttp.path;
   if (node.network == Network::H2 || node.network == Network::Http) return node.h2.path;
   return {};
 }
@@ -91,12 +93,28 @@ std::string extra_of(const ProxyNode& node, const char* key) {
   return it == node.extra.end() ? std::string() : it->second;
 }
 
+/// 证书指纹：探测得到的优先，其次是订阅里直接给的 `fingerprint:`（sha256 pin）。
+/// 两者都在 Xray 侧等价于 `pinnedPeerCertSha256`。
+std::string pinned_cert(const ProxyNode& node) {
+  return node.tls.pinned_cert_sha256.empty() ? node.tls.fingerprint
+                                             : node.tls.pinned_cert_sha256;
+}
+
 /// 把协议特有的传输层参数补进 query（vless / trojan / socks 等共用）。
 void add_transport(Query& q, const ProxyNode& node) {
   q_add(q, "type", transport_value(node));
   if (node.network == Network::Grpc) {
     q_add(q, "serviceName", node.grpc.service_name);
     if (node.grpc.multi_mode) q_add(q, "mode", "multi");
+  }
+  if (node.network == Network::Xhttp) {
+    // v2rayN BaseFmt.ToUriQuery / v2rayNG FmtBase.emitTransportQuery 都是
+    // `type=xhttp` + host/path/mode + `extra=<JSON>`（xhttp 的高级参数整包塞 extra）
+    if (!node.xhttp.mode.empty() && xhttp_mode_supported(node.xhttp.mode)) {
+      q_add(q, "mode", node.xhttp.mode);
+    }
+    const Json extra = xhttp_extra_json(node);
+    if (!extra.is_null()) q_add(q, "extra", extra.dump());
   }
   q_add(q, "host", transport_host(node));
   q_add(q, "path", transport_path(node));
@@ -156,7 +174,13 @@ std::optional<std::string> build_vmess(const ProxyNode& node) {
   payload["aid"] = text(std::to_string(node.alter_id));
   payload["scy"] = text(node.cipher.empty() ? "auto" : node.cipher);
   payload["net"] = text(transport_value(node));
-  payload["type"] = text(header_type(node).empty() ? "none" : header_type(node));
+  // vmess 的 `type` 在 xhttp 下装的是 xhttp mode，不是 headerType —— 见 v2rayN
+  // VmessFmt 的 `nameof(ETransport.xhttp) => item.GetTransportExtra().XhttpMode`
+  payload["type"] = text(node.network == Network::Xhttp
+                             ? (node.xhttp.mode.empty() ? std::string("none")
+                                                        : node.xhttp.mode)
+                             : (header_type(node).empty() ? std::string("none")
+                                                          : header_type(node)));
   payload["host"] = text(node.network == Network::Grpc ? std::string() : transport_host(node));
   payload["path"] =
       text(node.network == Network::Grpc ? node.grpc.service_name : transport_path(node));
@@ -194,6 +218,10 @@ std::optional<std::string> build_vless(const ProxyNode& node) {
   q_add(q, "flow", node.flow);
   q_add(q, "alpn", alpn_value(node));
   q_add(q, "packetEncoding", node.packet_encoding);
+  // v2rayN / v2rayNG 都从 `pcs` 读证书指纹（ItemCertSha -> pinnedPeerCertSha256 /
+  // pinnedCA256）。Xray 25+ 移除了 allowInsecure，这个参数是它们唯一能放行
+  // 「证书与 SNI 对不上」的节点的办法。
+  q_add(q, "pcs", pinned_cert(node));
   // v2rayNG 只在 security=tls 时写 allowInsecure，reality 不带该参数
   if (!node.tls.reality) q_flag(q, "allowInsecure", node.tls.insecure || node.scv);
 
@@ -209,6 +237,7 @@ std::optional<std::string> build_trojan(const ProxyNode& node) {
   add_transport(q, node);
   q_add(q, "alpn", alpn_value(node));
   q_add(q, "fp", node.tls.client_fingerprint);
+  q_add(q, "pcs", pinned_cert(node));
   q_flag(q, "allowInsecure", node.tls.insecure || node.scv);
 
   return "trojan://" + codec::percent_encode(node.password) + "@" + host_port(node) +
@@ -361,7 +390,7 @@ std::optional<std::string> build_v2rayn_item(const ProxyNode& node) {
   item["PublicKey"] = node.tls.reality_public_key;
   item["ShortId"] = node.tls.reality_short_id;
   item["SpiderX"] = extra_of(node, "spiderX");
-  item["CertSha"] = node.tls.fingerprint;
+  item["CertSha"] = pinned_cert(node);
   // vmess / vless 把 UUID 放在 Password；其余协议放各自的口令
   item["Password"] = (node.protocol == Protocol::Vmess || node.protocol == Protocol::Vless)
                          ? node.uuid
@@ -397,6 +426,13 @@ std::optional<std::string> build_v2rayn_item(const ProxyNode& node) {
   transport["Path"] = node.network == Network::Grpc ? std::string() : transport_path(node);
   transport["GrpcServiceName"] = node.grpc.service_name;
   transport["GrpcMode"] = node.grpc.multi_mode ? "multi" : std::string();
+  if (node.network == Network::Xhttp) {
+    // v2rayN TransportExtraItem / v2rayNG V2rayNTransportExtraShareItem 都有这两个字段，
+    // 且都把它落到 outbound 的 xhttpSettings.extra（JSON）上
+    transport["XhttpMode"] = node.xhttp.mode;
+    const Json extra = xhttp_extra_json(node);
+    transport["XhttpExtra"] = extra.is_null() ? std::string() : extra.dump();
+  }
   const std::string header = header_type(node);
   if (!header.empty() && !codec::iequals(header, "none")) transport["RawHeaderType"] = header;
   item["TransportExtraObj"] = std::move(transport);
@@ -467,6 +503,7 @@ Result<std::string> emit_sharelinks(const NodeList& nodes, const EmitOptions& op
   std::map<int, Skipped> skipped;
 
   std::string text;
+  std::size_t need_pin = 0;
   for (const auto& node : prepared) {
     auto line = v2rayn_mode ? build_v2rayn_item(node) : build_share_link(node);
     if (!line) {
@@ -474,6 +511,13 @@ Result<std::string> emit_sharelinks(const NodeList& nodes, const EmitOptions& op
       ++entry.count;
       if (entry.samples.size() < 3) entry.samples.push_back(node.name);
       continue;
+    }
+    // 需要跳过证书校验却没有指纹：走 Xray 内核的 vless / trojan 只能靠链接里的 pcs= 放行。
+    // hysteria2 / hysteria 不是 Xray 出站，它们的 `insecure` 在客户端里照样生效，不在此列。
+    const bool xray_based = node.protocol == Protocol::Vless || node.protocol == Protocol::Trojan;
+    if (xray_based && node.tls.insecure && !node.tls.reality && node.is_tls() &&
+        pinned_cert(node).empty()) {
+      ++need_pin;
     }
     text += *line;
     text.push_back('\n');
@@ -514,6 +558,13 @@ Result<std::string> emit_sharelinks(const NodeList& nodes, const EmitOptions& op
   if (warnings != nullptr) {
     for (const auto& detail : details) warnings->push_back(detail);
     if (!http_tls_note.empty()) warnings->push_back(http_tls_note);
+    if (need_pin > 0) {
+      warnings->push_back(
+          "有 " + std::to_string(need_pin) +
+          " 个节点要求跳过证书校验但没有证书指纹：v2rayN / v2rayNG 的 Xray 内核已移除 "
+          "allowInsecure，只能靠链接里的 pcs= 指纹放行（否则客户端里全是 -1）→ "
+          "加 --probe-cert 探测对端证书即可自动写入 pcs=");
+    }
   }
 
   if (text.empty()) {

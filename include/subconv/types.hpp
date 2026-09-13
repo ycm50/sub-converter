@@ -47,6 +47,7 @@ enum class Network {
   Http,
   Quic,
   Kcp,
+  Xhttp,
 };
 
 [[nodiscard]] const char* to_string(Network n) noexcept;
@@ -63,6 +64,10 @@ struct TlsOptions {
   std::string client_fingerprint;   ///< uTLS 指纹：chrome / firefox / ...
   std::string reality_public_key;   ///< public-key
   std::string reality_short_id;     ///< short-id
+  /// 探测到的对端叶子证书 SHA256（冒号分隔大写十六进制）。
+  /// Xray 25 起用 `pinnedPeerCertSha256` 取代 allowInsecure，而 `verifyPeerCertByName`
+  /// 依旧要求"证书链可信 + 名字匹配"；机场那种"证书和 SNI 对不上"的节点只能靠指纹放行。
+  std::string pinned_cert_sha256;
 };
 
 struct WsOptions {
@@ -81,6 +86,32 @@ struct GrpcOptions {
 struct H2Options {
   std::string path;
   std::vector<std::string> host;
+};
+
+/// XHTTP（Xray 的 splithttp / mihomo 的 xhttp）下载侧覆盖项。
+///
+/// 订阅里常见「上传走 A 机、下载走 B 机」的写法（`download-settings`）。mihomo 与
+/// Xray 对缺省值的处理一致：**没写的字段一律沿用主节点**，所以这里用 optional 表达
+/// 「未指定」，而不是提前填一个默认值 —— 否则会把「沿用」误写成「覆盖」。
+struct XhttpDownloadOptions {
+  bool present = false;
+  std::string server;                 ///< 下载侧服务器（空 = 与主节点相同）
+  std::optional<uint16_t> port;       ///< 下载侧端口（无 = 与主节点相同）
+  std::string path;                   ///< 下载侧路径（空 = 与主节点相同）
+  std::string host;                   ///< 下载侧 Host 头（空 = 沿用主节点）
+  std::string sni;                    ///< 下载侧 TLS serverName（空 = 沿用主节点）
+  std::optional<bool> tls;            ///< 下载侧是否 TLS（无 = 沿用主节点）
+  std::optional<bool> insecure;       ///< 下载侧是否跳过证书校验（无 = 沿用主节点）
+  std::string pinned_cert_sha256;     ///< 下载侧叶子证书 SHA256（探测得到）
+};
+
+/// XHTTP 传输参数（`network: xhttp`）。
+struct XhttpOptions {
+  std::string path;
+  std::string host;                                 ///< Host 头
+  std::string mode;                                 ///< auto / packet-up / stream-up / stream-one
+  std::map<std::string, std::string> headers;       ///< 额外请求头
+  XhttpDownloadOptions download;
 };
 
 /// Shadowsocks 插件（obfs-local / v2ray-plugin / shadow-tls ...）
@@ -134,6 +165,7 @@ struct ProxyNode {
   WsOptions ws;
   GrpcOptions grpc;
   H2Options h2;
+  XhttpOptions xhttp;
   SsPlugin plugin;
 
   bool udp = true;

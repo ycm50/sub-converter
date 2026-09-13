@@ -19,7 +19,15 @@ std::map<std::string, std::string> json_to_query(const Json& j) {
     if (!v.empty()) q[key] = std::move(v);
   };
   put("net", "net");
-  put("headerType", "type");
+  // vmess 的 `type` 字段在 xhttp 下装的是 xhttp mode（v2rayN VmessFmt 的映射就是如此），
+  // 其余传输才是 headerType —— 别把 mode 塞进 headerType，否则链接往返会漂成
+  // `headerType=stream-up` 这种谁都不认的参数。
+  const std::string net = codec::to_lower(parse_detail::jstring(j, "net"));
+  if (net == "xhttp" || net == "splithttp") {
+    put("mode", "type");
+  } else {
+    put("headerType", "type");
+  }
   put("host", "host");
   put("path", "path");
   put("sni", "sni");

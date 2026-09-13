@@ -81,6 +81,14 @@ void print_usage(std::FILE* out) {
       --cache-ttl <秒>     缓存有效期，默认 300；0 表示永不过期
       --no-cache           禁用缓存
 
+证书:
+      --probe-cert         转换前连接每个节点取对端证书的 SHA256 指纹，写进 xray 目标的
+                           pinnedPeerCertSha256 / 分享链接的 pcs=
+                           为什么需要：Xray 25+ 移除了 allowInsecure，而替代的
+                           verifyPeerCertByName 仍要求"链可信 + 名字匹配"，机场那种
+                           「证书与 SNI 对不上」的节点会全部握手失败（客户端里全是 -1）
+      --probe-cert-timeout <秒>  单个节点的探测超时，默认 5
+
 其他:
   -v, --verbose            打印解析/抓取明细
   -h, --help               显示本帮助
@@ -228,6 +236,17 @@ int parse_args(int argc, char** argv, Options& opt, std::string& error) {
       opt.emit.ipv6 = true;
     } else if (arg == "--no-ipv6") {
       opt.emit.ipv6 = false;
+    } else if (arg == "--probe-cert") {
+      // 探测节点证书指纹：需要联网，转换器平时只做本地转换，所以默认关闭
+      opt.emit.probe_cert = true;
+    } else if (arg == "--probe-cert-timeout") {
+      long value = 0;
+      if (!need_long(i, "--probe-cert-timeout", value)) return -1;
+      if (value < 1 || value > 120) {
+        error = "选项 --probe-cert-timeout 需要在 1-120 秒之间，收到: " + std::to_string(value);
+        return -1;
+      }
+      opt.emit.probe_cert_timeout_seconds = static_cast<int>(value);
     } else if (arg == "--list-dns") {
       opt.list_dns = true;
     } else if (arg == "--name") {
@@ -416,6 +435,14 @@ int main(int argc, char** argv) {
   }
 
   std::vector<std::string> emit_warnings;
+  if (opt.emit.probe_cert) {
+    const std::size_t probed = subconv::fetch::probe_node_certificates(
+        all_nodes, opt.emit.probe_cert_timeout_seconds, &emit_warnings);
+    if (opt.verbose || probed > 0) {
+      subconv::console::write_line(stderr, "已探测 " + std::to_string(probed) +
+                                               " 个证书指纹（--probe-cert）");
+    }
+  }
   auto output = subconv::emit_config(all_nodes, opt.emit, &emit_warnings);
   if (!output) {
     subconv::console::write_line(stderr, "错误: 生成配置失败: " + output.error().message);

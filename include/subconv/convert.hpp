@@ -69,6 +69,14 @@ struct EmitOptions {
   std::vector<std::string> dns = default_dns();
   bool ipv6 = true;             ///< 根节点与 dns 段的 ipv6，并决定是否带上各预设的 IPv6 地址
   std::string filename;         ///< 订阅名，供 Content-Disposition 与配置头注释使用
+  /// 转换前逐节点探测对端证书指纹（需要联网、会主动连接节点）。
+  ///
+  /// 为什么需要：Xray 25 起移除了 `allowInsecure`，替代品 `verifyPeerCertByName` 仍要求
+  /// 「证书链可信 **且** 名字匹配」，机场那种「证书与 SNI 对不上」的节点用它必然握手失败
+  /// （客户端表现就是所有节点延迟 -1）。探测到的指纹写进 Xray 的 `pinnedPeerCertSha256`
+  /// 或分享链接的 `pcs=`（v2rayN / v2rayNG）即可正常放行。
+  bool probe_cert = false;
+  int probe_cert_timeout_seconds = 5;  ///< 单个节点的探测超时
 };
 
 /// 把节点渲染成目标客户端配置文本。

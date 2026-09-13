@@ -1,7 +1,9 @@
 # 构建产物
 build/
+build-win-*/
 cmake-build-*/
 out/
+dist/
 
 # 校验工具链下载的二进制（仅开发期使用）
 tools/bin/
@@ -40,3 +42,6 @@ NUL
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# 临时实验目录（下载的订阅、探测用的中间产物）
+scratch/

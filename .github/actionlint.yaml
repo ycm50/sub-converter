@@ -1,0 +1,9 @@
+# actionlint 的配置。
+#
+# actionlint 自带的托管 runner 标签表更新得比 GitHub 慢，会把官方托管机型误报成
+# "unknown label"。这里补上它还不认识的（来源见 GitHub 文档
+# data/reusables/actions/supported-github-runners.md，公开仓库和私有仓库都提供）：
+#   windows-11-arm   Windows 11 arm64，4 核 16G
+self-hosted-runner:
+  labels:
+    - windows-11-arm

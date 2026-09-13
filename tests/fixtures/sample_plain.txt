@@ -8,6 +8,7 @@ vmess://eyJ2IjoiMiIsInBzIjoiVk1lc3MtVENQIiwiYWRkIjoidm0zLmV4YW1wbGUuY29tIiwicG9y
 vless://b831381d-6324-4d53-ad4f-8cda48b30811@vl.example.com:443?encryption=none&security=tls&sni=vl.example.com&type=ws&host=vl.example.com&path=%2Fvlws&fp=chrome&alpn=h2%2Chttp%2F1.1#VLESS-WS-TLS
 vless://b831381d-6324-4d53-ad4f-8cda48b30811@vl2.example.com:443?encryption=none&security=reality&sni=www.microsoft.com&fp=chrome&pbk=YQfPqk3nJP8vT1sBcDeFgHiJkLmNoPqRsTuVwXyZ012&sid=0123abcd&type=tcp&flow=xtls-rprx-vision#VLESS-REALITY
 vless://b831381d-6324-4d53-ad4f-8cda48b30811@vl3.example.com:8443?encryption=none&security=tls&sni=vl3.example.com&type=grpc&serviceName=vlgrpc&fp=firefox#VLESS-gRPC
+vless://b831381d-6324-4d53-ad4f-8cda48b30811@vlx.example.com:443?encryption=none&security=tls&sni=update.microsoft.com&type=xhttp&host=vlx.example.com&path=%2Fpath&mode=stream-up&extra=%7B%22downloadSettings%22%3A%7B%22address%22%3A%22down.example.com%22%2C%22port%22%3A8443%2C%22network%22%3A%22xhttp%22%2C%22xhttpSettings%22%3A%7B%22path%22%3A%22%2Fpath%22%7D%2C%22security%22%3A%22tls%22%2C%22tlsSettings%22%3A%7B%22serverName%22%3A%22update.microsoft.com%22%7D%7D%7D&allowInsecure=1#VLESS-XHTTP
 trojan://tjpw@tj.example.com:443?sni=tj.example.com&type=ws&path=%2Ftjws&host=tj.example.com#TROJAN-WS
 trojan://tjpw2@tj2.example.com:443?sni=tj2.example.com&type=grpc&serviceName=tjgrpc#TROJAN-gRPC
 hysteria://hy.example.com:443?auth=hypw&peer=hy.example.com&insecure=1&upmbps=100&downmbps=200&alpn=h3&protocol=udp#HYSTERIA1

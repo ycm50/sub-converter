@@ -12,6 +12,10 @@ function B64U([string]$s) {
 
 $uuid = 'b831381d-6324-4d53-ad4f-8cda48b30811'
 
+# XHTTP（Xray 的 splithttp / mihomo 的 xhttp）：机场 2025 年底起的新形态，
+# `extra` 里带 download-settings（上传走一台、下载走另一台）
+$xhttpExtra = '{"downloadSettings":{"address":"down.example.com","port":8443,"network":"xhttp","xhttpSettings":{"path":"/path"},"security":"tls","tlsSettings":{"serverName":"update.microsoft.com"}}}'
+
 # --- VMess（v2rayN 的 base64(JSON) 格式）---------------------------------
 $vmessWs = '{"v":"2","ps":"VMess-WS-TLS","add":"vm.example.com","port":"443","id":"' + $uuid + '","aid":"0","scy":"auto","net":"ws","type":"none","host":"vm.example.com","path":"/vmws","tls":"tls","sni":"vm.example.com","alpn":"h2,http/1.1","fp":"chrome"}'
 $vmessGrpc = '{"v":"2","ps":"VMess-gRPC","add":"vm2.example.com","port":8443,"id":"' + $uuid + '","aid":0,"scy":"aes-128-gcm","net":"grpc","type":"none","path":"grpcsvc","tls":"tls","sni":"vm2.example.com"}'
@@ -40,6 +44,7 @@ $uris = @(
   ('vless://' + $uuid + '@vl.example.com:443?encryption=none&security=tls&sni=vl.example.com&type=ws&host=vl.example.com&path=%2Fvlws&fp=chrome&alpn=h2%2Chttp%2F1.1#VLESS-WS-TLS'),
   ('vless://' + $uuid + '@vl2.example.com:443?encryption=none&security=reality&sni=www.microsoft.com&fp=chrome&pbk=YQfPqk3nJP8vT1sBcDeFgHiJkLmNoPqRsTuVwXyZ012&sid=0123abcd&type=tcp&flow=xtls-rprx-vision#VLESS-REALITY'),
   ('vless://' + $uuid + '@vl3.example.com:8443?encryption=none&security=tls&sni=vl3.example.com&type=grpc&serviceName=vlgrpc&fp=firefox#VLESS-gRPC'),
+  ('vless://' + $uuid + '@vlx.example.com:443?encryption=none&security=tls&sni=update.microsoft.com&type=xhttp&host=vlx.example.com&path=%2Fpath&mode=stream-up&extra=' + [Uri]::EscapeDataString($xhttpExtra) + '&allowInsecure=1#VLESS-XHTTP'),
 
   # Trojan
   ('trojan://tjpw@tj.example.com:443?sni=tj.example.com&type=ws&path=%2Ftjws&host=tj.example.com#TROJAN-WS'),

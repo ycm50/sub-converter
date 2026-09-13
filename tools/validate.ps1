@@ -4,6 +4,7 @@
 #   .\tools\validate.ps1 -Source tests\fixtures\all_protocols_b64.txt -Target clash
 #   .\tools\validate.ps1 -Source tests\fixtures\all_protocols_b64.txt -Target xray
 #   .\tools\validate.ps1 -Source tests\fixtures\all_protocols_b64.txt -Target singbox
+#   .\tools\validate.ps1 -Source sub.yaml -Target xray -ProbeCert  # 顺带探测证书指纹
 #
 # 注意：参数名不能用 -Input —— $Input 是 PowerShell 自动变量，会把同名参数覆盖掉。
 #
@@ -17,7 +18,10 @@ param(
   [string]$Source,
   [ValidateSet("clash", "xray", "singbox")]
   [string]$Target = "clash",
-  [switch]$Setup
+  [switch]$Setup,
+  # 转换时加 --probe-cert：主动连节点取证书 SHA256，写进 xray 的 pinnedPeerCertSha256。
+  # 不加的话，「证书与 SNI 对不上」的机场节点在 Xray 下必然握手失败（客户端全是 -1）。
+  [switch]$ProbeCert
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,11 +30,45 @@ try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catc
 $root = Split-Path -Parent $PSScriptRoot
 $binDir = Join-Path $PSScriptRoot "bin"
 $subconv = Join-Path $root "build\subconv.exe"
-$curl = "A:\msys64\usr\bin\curl.exe"
 
-# 下载内核需要走代理（GitHub）
-$env:http_proxy = "http://127.0.0.1:10808"
-$env:https_proxy = "http://127.0.0.1:10808"
+# curl：优先用环境变量指定的，其次本机 MSYS2 的两套安装位置，最后退回 PATH 上的 curl
+# （Windows 10/11 自带 C:\Windows\System32\curl.exe —— CI 里走的就是它）。
+function Resolve-Curl {
+  if ($env:SUBCONV_CURL -and (Test-Path $env:SUBCONV_CURL)) { return $env:SUBCONV_CURL }
+  foreach ($candidate in "A:\msys64\usr\bin\curl.exe", "C:\msys64\usr\bin\curl.exe") {
+    if (Test-Path $candidate) { return $candidate }
+  }
+  $onPath = Get-Command curl.exe -ErrorAction SilentlyContinue
+  if ($onPath) { return $onPath.Source }
+  throw "找不到 curl.exe：请装 MSYS2，或用 SUBCONV_CURL 指定路径"
+}
+
+# 下载内核 / geodata 都要连 GitHub。开发机常常需要走本地代理，CI 则是直连：
+# 有 SUBCONV_VALIDATE_PROXY 就用它，否则只在 127.0.0.1:10808 真的在监听时才走代理。
+function Test-LocalPort([int]$Port) {
+  $client = $null
+  try {
+    $client = New-Object System.Net.Sockets.TcpClient
+    $task = $client.ConnectAsync("127.0.0.1", $Port)
+    if ($task.Wait(300) -and $client.Connected) { return $true }
+    return $false
+  } catch {
+    return $false
+  } finally {
+    if ($client) { $client.Close() }
+  }
+}
+
+$curl = Resolve-Curl
+$proxy = $env:SUBCONV_VALIDATE_PROXY
+if (-not $proxy -and (Test-LocalPort 10808)) { $proxy = "http://127.0.0.1:10808" }
+if ($proxy) {
+  $env:http_proxy = $proxy
+  $env:https_proxy = $proxy
+  Write-Host "下载内核走代理：$proxy" -ForegroundColor DarkGray
+} else {
+  Remove-Item Env:http_proxy, Env:https_proxy -ErrorAction SilentlyContinue
+}
 
 # 原生命令包装器
 #
@@ -144,7 +182,9 @@ $ext = if ($Target -eq "clash") { "yaml" } else { "json" }
 $config = Join-Path $work "config.$ext"
 
 Write-Host "== 转换 ($Target) ==" -ForegroundColor Cyan
-$code = Invoke-Native $subconv @("-i", $Source, "-t", $Target, "-o", $config, "-v")
+$convertArgs = @("-i", $Source, "-t", $Target, "-o", $config, "-v")
+if ($ProbeCert) { $convertArgs += "--probe-cert" }
+$code = Invoke-Native $subconv $convertArgs
 if ($code -ne 0) { throw "转换失败" }
 
 switch ($Target) {

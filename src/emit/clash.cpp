@@ -33,6 +33,7 @@ const char* clash_network(Network n) {
     case Network::Http: return "http";
     case Network::Quic: return "quic";
     case Network::Kcp: return "kcp";
+    case Network::Xhttp: return "xhttp";
     case Network::Tcp: return "tcp";
   }
   return "tcp";
@@ -162,6 +163,38 @@ void add_transport(Yaml& y, const ProxyNode& n) {
       y.set("http-opts", std::move(http));
       break;
     }
+    case Network::Xhttp: {
+      // mihomo 的 xhttp-opts 是扁平映射：xhttp 自身字段与 download-settings
+      // 下的「代理字段」混在一起，字段名照 transport/xhttp + adapter/outbound/vless.go 抄。
+      Yaml xhttp = Yaml::mapping();
+      if (!n.xhttp.path.empty()) xhttp.set("path", Yaml::scalar(n.xhttp.path));
+      if (!n.xhttp.host.empty()) xhttp.set("host", Yaml::scalar(n.xhttp.host));
+      if (!n.xhttp.mode.empty() && xhttp_mode_supported(n.xhttp.mode)) {
+        xhttp.set("mode", Yaml::scalar(n.xhttp.mode));
+      }
+      if (!n.xhttp.headers.empty()) {
+        Yaml headers = Yaml::mapping();
+        for (const auto& [key, value] : n.xhttp.headers) {
+          headers.set(key, Yaml::scalar(value));
+        }
+        xhttp.set("headers", std::move(headers));
+      }
+      if (n.xhttp.download.present) {
+        const XhttpDownloadOptions& d = n.xhttp.download;
+        Yaml ds = Yaml::mapping();
+        if (!d.path.empty()) ds.set("path", Yaml::scalar(d.path));
+        if (!d.host.empty()) ds.set("host", Yaml::scalar(d.host));
+        if (!d.server.empty()) ds.set("server", Yaml::scalar(d.server));
+        if (d.port.has_value()) ds.set("port", Yaml::integer(*d.port));
+        if (!d.sni.empty()) ds.set("servername", Yaml::scalar(d.sni));
+        // tls / skip-cert-verify 留空即「沿用主节点」，不要替内核补默认值
+        if (d.tls.has_value()) ds.set("tls", Yaml::boolean(*d.tls));
+        if (d.insecure.has_value()) ds.set("skip-cert-verify", Yaml::boolean(*d.insecure));
+        if (!ds.empty()) xhttp.set("download-settings", std::move(ds));
+      }
+      if (!xhttp.empty()) y.set("xhttp-opts", std::move(xhttp));
+      break;
+    }
     default:
       break;
   }
@@ -180,6 +213,18 @@ Yaml build_proxy(const ProxyNode& n, const EmitOptions& opts,
                        "）：" + reason);
     return Yaml();
   };
+
+  // xhttp 在 mihomo 里只挂在 vless 出站上（transport/xhttp 仅被 adapter/outbound/vless.go
+  // 引用；vmess/trojan 的 StreamConnContext 都没有这个 case），别产出内核加载不了的节点。
+  if (n.network == Network::Xhttp) {
+    if (legacy) return reject("原版 Clash 不支持 xhttp 传输");
+    if (n.protocol != Protocol::Vless) return reject("mihomo 的 xhttp 传输只支持 vless 出站");
+    if (xhttp_extra_has_untranslatable(n)) {
+      warnings.push_back("节点 " + n.name +
+                         "（vless）：xhttp 的 extra 里有 mihomo 表达不了的键，只保留了 download-settings；"
+                         "要完整保留请用 -t xray 或 -t links");
+    }
+  }
 
   Yaml y = Yaml::mapping();
   y.set("name", Yaml::scalar(n.name));
