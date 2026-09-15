@@ -12,6 +12,7 @@
 #include "subconv/fetch.hpp"
 #include "subconv/json.hpp"
 #include "subconv/server.hpp"
+#include "subconv/vless_encryption.hpp"
 #include "subconv/yaml.hpp"
 
 namespace {
@@ -2040,6 +2041,229 @@ proxies:
   }
 }
 
+// VLESS Encryption（Xray 的 XTLS Vision Seed / ML-KEM 扩展）。
+// 曾经的通病：vless:// 转 Clash 时这个参数被中间层丢掉 → 服务端解不开 VLESS 头，
+// 既不回包也不断开，客户端只能等到拨号超时（「连上了但一直没数据」）。
+void test_vless_encryption() {
+  section("VLESS Encryption");
+  const std::string uuid = "b831381d-6324-4d53-ad4f-8cda48b30811";
+  // Xray 文档里的样例形态：最后一块是 `xray mlkem768` 的 Client 段
+  const std::string key = "ptjHQxBQxTJ9MWr2cd5qWIflBSACHOevTauCQwa_71U";
+  const std::string enc = "mlkem768x25519plus.native.0rtt." + key;
+
+  // --- 结构解析：合法形态 ---
+  {
+    const subconv::VlessEncryption info = subconv::parse_vless_encryption(enc);
+    CHECK(info.present);
+    CHECK_EQ(info.raw, enc);
+    CHECK_EQ(info.handshake, std::string("mlkem768x25519plus"));
+    CHECK_EQ(info.appearance, std::string("native"));
+    CHECK_EQ(info.rtt, std::string("0rtt"));
+    CHECK_EQ(info.padding_blocks, std::size_t{0});
+    CHECK_EQ(info.key, key);
+    CHECK(info.problem.empty());
+  }
+  // 文档里带 padding 的完整写法：padding.delay.padding + 认证参数
+  {
+    const std::string padded =
+        "mlkem768x25519plus.xorpub.1rtt.100-111-1111.75-0-111.50-0-3333." + key;
+    const subconv::VlessEncryption info = subconv::parse_vless_encryption(padded);
+    CHECK(info.present);
+    CHECK_EQ(info.appearance, std::string("xorpub"));
+    CHECK_EQ(info.rtt, std::string("1rtt"));
+    CHECK_EQ(info.padding_blocks, std::size_t{3});
+    CHECK_EQ(info.key, key);
+    CHECK(info.problem.empty());
+  }
+
+  // --- 结构解析：none / 空 / 各种坏写法都要能识别出来 ---
+  CHECK(!subconv::parse_vless_encryption("none").present);
+  CHECK(!subconv::parse_vless_encryption("").present);
+  CHECK(!subconv::parse_vless_encryption("  ").present);
+  CHECK_EQ(subconv::normalize_vless_encryption("NONE"), std::string());
+  CHECK_EQ(subconv::normalize_vless_encryption("  " + enc + " "), enc);
+  // 未知握手方式
+  {
+    const subconv::VlessEncryption info =
+        subconv::parse_vless_encryption("aes-128-gcm.native.0rtt." + key);
+    CHECK(info.present);
+    CHECK(!info.problem.empty());
+  }
+  // 缺认证参数（只有三块）
+  CHECK(!subconv::parse_vless_encryption("mlkem768x25519plus.native.0rtt").problem.empty());
+  // 末尾多了一个点 → 空块
+  CHECK(!subconv::parse_vless_encryption(enc + ".").problem.empty());
+  // padding 以 delay 结尾（块数为偶）不合法
+  CHECK(!subconv::parse_vless_encryption(enc + ".50-0-3333.75-0-111").problem.empty());
+  // 首个 padding 必须 100% 且最小长度 > 0
+  CHECK(!subconv::parse_vless_encryption(enc + ".50-0-3333.75-0-111.100-0-1").problem.empty());
+  // 概率超过 100
+  CHECK(!subconv::parse_vless_encryption(enc + ".101-1-2").problem.empty());
+
+  // --- 分享链接解析 ---
+  auto node = subconv::parse_node(
+      "vless://" + uuid +
+      "@enc.example.com:443?encryption=" + enc +
+      "&security=tls&sni=enc.example.com&type=ws&path=%2Fws&host=enc.example.com"
+      "&flow=xtls-rprx-vision#ENC");
+  CHECK(node.has_value());
+  if (!node) return;
+  CHECK_EQ(node->encryption, enc);
+  CHECK(subconv::vless_encryption_enabled(*node));
+  CHECK_EQ(subconv::vless_encryption_of(*node), enc);
+  CHECK(subconv::vless_encryption_warning(*node).empty());  // 参数完整 → 不告警
+
+  // encryption=none 不该在节点上留下任何东西
+  auto plain = subconv::parse_node(
+      "vless://" + uuid + "@p.example.com:443?encryption=none&security=tls&sni=p.example.com#P");
+  CHECK(plain.has_value());
+  if (plain) {
+    CHECK(plain->encryption.empty());
+    CHECK(!subconv::vless_encryption_enabled(*plain));
+  }
+  // flow=vision 但既不是 TCP+TLS、也没开 encryption → 必须告警（这种组合握手必失败）
+  auto vision_ws = subconv::parse_node(
+      "vless://" + uuid +
+      "@b.example.com:443?security=tls&sni=b.example.com&type=ws&path=%2Fws"
+      "&flow=xtls-rprx-vision#B");
+  CHECK(vision_ws.has_value());
+  if (vision_ws) CHECK(!subconv::vless_encryption_warning(*vision_ws).empty());
+  // TCP + TLS + vision 是合法组合，不该告警
+  auto vision_tcp = subconv::parse_node(
+      "vless://" + uuid +
+      "@t.example.com:443?security=tls&sni=t.example.com&type=tcp&flow=xtls-rprx-vision#T");
+  CHECK(vision_tcp.has_value());
+  if (vision_tcp) CHECK(subconv::vless_encryption_warning(*vision_tcp).empty());
+
+  // --- Clash 目标：必须写出 encryption（这正是历史 bug） ---
+  subconv::EmitOptions clash_opts;
+  clash_opts.target = "clash";
+  std::vector<std::string> clash_warnings;
+  auto clash = subconv::emit_config({*node}, clash_opts, &clash_warnings);
+  CHECK(clash.has_value());
+  if (clash) {
+    CHECK(clash->find("encryption: " + enc + "\n") != std::string::npos);
+    CHECK(clash->find("flow: xtls-rprx-vision") != std::string::npos);
+    // 参数完整时不该产生任何告警
+    CHECK(clash_warnings.empty());
+  }
+  // 结构不对的 encryption 要告警，但值照样原样写进产物
+  {
+    subconv::ProxyNode bad = *node;
+    bad.encryption = "mlkem768x25519plus.native.0rtt";  // 少了认证参数
+    std::vector<std::string> warn;
+    subconv::EmitOptions opts;
+    opts.target = "clash";
+    auto out = subconv::emit_config({bad}, opts, &warn);
+    CHECK(out.has_value());
+    if (out) CHECK(out->find("encryption: mlkem768x25519plus.native.0rtt\n") != std::string::npos);
+    CHECK_EQ(warn.size(), std::size_t{1});
+    if (!warn.empty()) CHECK(warn[0].find("encryption") != std::string::npos);
+  }
+
+  // --- Xray 目标：encryption 不能是写死的 none ---
+  subconv::EmitOptions xray_opts;
+  xray_opts.target = "xray";
+  auto xray = subconv::emit_config({*node}, xray_opts);
+  CHECK(xray.has_value());
+  if (xray) {
+    const Json j = Json::parse(*xray, nullptr, false);
+    CHECK(!j.is_discarded());
+    if (!j.is_discarded()) {
+      bool found_vless = false;
+      for (const auto& o : j["outbounds"]) {
+        if (o["protocol"] != "vless") continue;
+        found_vless = true;
+        CHECK_EQ(o["settings"]["vnext"][0]["users"][0]["encryption"], enc);
+        CHECK_EQ(o["settings"]["vnext"][0]["users"][0]["flow"], std::string("xtls-rprx-vision"));
+      }
+      CHECK(found_vless);
+    }
+  }
+  // 没开加密时依旧是显式的 "none"（Xray 的这个字段不允许留空）
+  if (plain) {
+    auto xray_plain = subconv::emit_config({*plain}, xray_opts);
+    CHECK(xray_plain.has_value());
+    if (xray_plain) {
+      const Json j = Json::parse(*xray_plain, nullptr, false);
+      CHECK(!j.is_discarded());
+      if (!j.is_discarded()) {
+        CHECK_EQ(j["outbounds"][0]["settings"]["vnext"][0]["users"][0]["encryption"],
+                 std::string("none"));
+      }
+    }
+  }
+
+  // --- sing-box 目标：它没有 VLESS Encryption，必须跳过并说明 ---
+  {
+    subconv::EmitOptions singbox_opts;
+    singbox_opts.target = "singbox";
+    std::vector<std::string> warn;
+    auto singbox = subconv::emit_config({*node}, singbox_opts, &warn);
+    CHECK(!singbox.has_value());  // 唯一节点被跳过 → 没有可输出的节点
+    const std::string joined = join(warn, " | ");
+    CHECK(joined.find("VLESS Encryption") != std::string::npos);
+  }
+
+  // --- 分享链接：原样回写，且能自己解析回来 ---
+  {
+    subconv::EmitOptions link_opts;
+    link_opts.target = "links";
+    auto links = subconv::emit_config({*node}, link_opts);
+    CHECK(links.has_value());
+    if (links) {
+      CHECK(links->find("encryption=" + enc) != std::string::npos);
+      auto back = subconv::parse_node(*links);
+      CHECK(back.has_value());
+      if (back) {
+        CHECK_EQ(back->encryption, enc);
+        CHECK_EQ(back->flow, std::string("xtls-rprx-vision"));
+      }
+    }
+    // v2rayn 目标写在 ProtoExtraObj.VlessEncryption 里（v2rayN 的字段名）
+    subconv::EmitOptions v2rayn_opts;
+    v2rayn_opts.target = "v2rayn";
+    auto v2rayn = subconv::emit_config({*node}, v2rayn_opts);
+    CHECK(v2rayn.has_value());
+    if (v2rayn) {
+      // 形如 v2rayn://vless/<base64url(JSON)>：路径段不能省，所以先剥 scheme 再找 '/'
+      const std::string line = trim(*v2rayn);
+      CHECK_EQ(line.substr(0, 9), std::string("v2rayn://"));
+      const std::string rest = line.substr(9);
+      const std::size_t slash = rest.find('/');
+      CHECK(slash != std::string::npos);
+      if (slash != std::string::npos) {
+        auto decoded = base64_decode(rest.substr(slash + 1));
+        CHECK(decoded.has_value());
+        if (decoded) {
+          const Json item = Json::parse(*decoded, nullptr, false);
+          CHECK(!item.is_discarded());
+          if (!item.is_discarded()) {
+            CHECK_EQ(item["ProtoExtraObj"]["VlessEncryption"], enc);
+            CHECK_EQ(item["ProtoExtraObj"]["Flow"], std::string("xtls-rprx-vision"));
+          }
+        }
+      }
+    }
+  }
+
+  // --- Clash YAML 作为输入源：读回来不能丢（否则「YAML 进 → 分享链接出」会掉参数） ---
+  if (clash) {
+    auto round = subconv::parse_clash_yaml(*clash, "test");
+    CHECK(round.has_value());
+    if (round) {
+      bool found = false;
+      for (const auto& n2 : round->nodes) {
+        if (n2.protocol != subconv::Protocol::Vless) continue;
+        found = true;
+        CHECK_EQ(n2.encryption, enc);
+        CHECK_EQ(n2.flow, std::string("xtls-rprx-vision"));
+      }
+      CHECK(found);
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -2063,6 +2287,7 @@ int main() {
   test_share_links();
   test_v2rayn_share();
   test_xhttp();
+  test_vless_encryption();
 
   std::printf("\n%d 项断言，%d 项失败\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;

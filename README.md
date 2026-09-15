@@ -19,6 +19,7 @@
 - [协议 × 目标 支持矩阵](#协议--目标-支持矩阵)
   - [传输层（network）× 目标](#传输层network--目标)
   - [证书校验：为什么同一份订阅在 Clash 里能用、在 Xray 里全是 -1](#证书校验为什么同一份订阅在-clash-里能用在-xray-里全是--1)
+  - [VLESS Encryption：为什么节点连不上却没有任何报错](#vless-encryption为什么节点连不上却没有任何报错)
 - [快速开始](#快速开始)
 - [支持的平台](#支持的平台)
 - [从源码构建](#从源码构建)
@@ -42,8 +43,9 @@
 
 ## 特性
 
-- **协议覆盖全**：11 种分享链接形态 + 上游 Clash YAML（含 JSON 版），含 vmess 的 ws/grpc/h2/http、vless 的
-  reality、**vless 的 xhttp（含 `download-settings` 上下行分流）**、ss 的 obfs / v2ray-plugin、
+- **协议覆盖全**：11 种分享链接形态 + 上游 Clash YAML（含 JSON 版），含 vmess 的 ws/grpc/h2/http、
+  vless 的 reality、**vless 的 xhttp（含 `download-settings` 上下行分流）**、**vless 的
+  `encryption`（VLESS Encryption / XTLS Vision Seed）**、ss 的 obfs / v2ray-plugin、
   hysteria2 的 obfs 等传输细节。
 - **手写输出器**：YAML / JSON / Base64 / URI 全部自己渲染 —— 订阅场景里 Base64 变体极多，
   而 Clash 配置对 key 顺序与引号敏感，只有自己掌控才能保证输出确定、可读、可校验。
@@ -86,6 +88,12 @@
 > **2026-09 补充 2**：修掉两个输入侧的坑 —— Web UI 输入框曾经把每行 `trim` 后拼回去，粘贴的
 > Clash YAML 会因丢缩进报 `end of map not found`；面板 `?app=clash` 返回的 **JSON 版 Clash 配置**
 > 曾被当成「不支持的 JSON 配置」拒掉，现在按 Clash YAML 解析。
+>
+> **2026-09 补充 3**：支持 Xray 的 **VLESS Encryption**（`encryption=mlkem768x25519plus.…`）。
+> 之前这个字段在解析时会被丢弃，产物里节点不缺不加、客户端却全部超时（服务端解不开 VLESS 头部
+> 就既不回包也不关连接）。现在链接 / Clash YAML 两种输入都解析它，clash / xray / links / v2rayn
+> 四个目标都原样透传并计入去重指纹，sing-box 目标明确跳过并告警 —— 见
+> 「[VLESS Encryption](#vless-encryption为什么节点连不上却没有任何报错)」。
 
 **目标优先级**：Clash(mihomo) → Xray → sing-box。
 
@@ -129,6 +137,7 @@
 | shadowsocksr | ✅ | ❌ 不支持 | ❌ 不支持 | ❌ 不支持 |
 | vmess | ✅ ws/grpc/h2/http | ✅ | ✅ | ✅ |
 | vless + reality | ✅ | ✅ | ✅ | ✅ |
+| vless + encryption | ✅ 实测 | ✅ 实测 | ❌ 内核无此字段，跳过并告警 | ✅ 实测 |
 | trojan | ✅ | ✅ | ✅ | ✅ |
 | hysteria v1 | ✅ | ❌ 不支持 | ✅ | ❌ 只支持 hysteria2 |
 | hysteria2 | ✅ | ❌ 不支持 | ✅ | ✅ |
@@ -221,6 +230,57 @@ The feature "allowInsecure" has been removed and migrated to
 > `curl --socks5-hostname` 请求 `http://www.gstatic.com/generate_204` 全部返回
 > `HTTP/1.1 204 No Content`；不加 `--probe-cert` 时同一节点报
 > `peer cert is invalid (against root CAs and verifyPeerCertByName)`，一个都不通。
+
+### VLESS Encryption：为什么节点连不上却没有任何报错
+
+2026 年起 Xray 给 VLESS 加了一层**协议内加密**（官方叫「VLESS 加密」，也叫 XTLS Vision Seed：
+用 ML-KEM-768 + X25519 混合协商后量子安全的会话密钥），节点参数长这样：
+
+```
+mlkem768x25519plus.native.0rtt.100-111-1111.75-0-111.50-0-3333.<客户端认证公钥>
+```
+
+块之间用 `.` 分隔，含义固定：
+
+| 块 | 取值 | 说明 |
+|---|---|---|
+| 1 | `mlkem768x25519plus` | 握手算法，目前只有这一个 |
+| 2 | `native` / `xorpub` / `random` | 客户端公钥的伪装形态 |
+| 3 | `0rtt` / `1rtt` | 往返次数 |
+| 4… | `prob-min-max`（可多段） | padding / delay 策略，第一段必须是 `100` 且 `min > 0` |
+| 末段 | 客户端认证公钥 | `xray mlkem768` 生成的 Client 部分 |
+
+中间块省略时内核用默认值补齐（padding 缺省为 `100-111-1111.75-0-111.50-0-3333`）。
+`encryption` **不能为空**——要关闭必须显式写 `none`。subconv 只对结构明显不合法的值
+（块数不足、未知算法/形态、概率越界、首段 padding 非 `100` 或 `min = 0`、缺少公钥段……）
+记一条校验告警，值本身**原样透传，绝不改写或丢弃**（`src/core/vless_encryption.cpp`）。
+
+**这个字段只有 Xray / mihomo 认识**，各目标的落地情况：
+
+| 目标 | 支持 | 落点 |
+|---|---|---|
+| clash (mihomo) | ✅ 实测 v1.19.31 | 出站 `encryption:` |
+| xray | ✅ 实测 26.3.27 | `outbounds[].settings.vlessSettings.users[].encryption`（未设置时显式写 `"none"`） |
+| 分享链接 / v2rayNG | ✅ | 链接 query 的 `encryption=`；`v2rayn` 目标写 `ProtoExtraObj.VlessEncryption` |
+| sing-box | ❌ | 1.14 的 VLESS 出站没有该字段（内核二进制里搜不到 `mlkem768x25519plus`），节点被跳过并告警 |
+
+**踩坑点在于：丢了 `encryption` 不报错，而是「静默黑洞」。** 服务端拿不到它就解不开 VLESS 头部，
+于是**既不回包也不关连接**，客户端只能干等到 dial timeout —— 表现是整份订阅全部超时 / `-1`，
+日志里一句有用的错误都没有。最典型的场景是「同一份节点直连 mihomo 能用，过一层订阅转换就全超时」：
+中间那层把没见过的 query 参数丢掉了。所以 subconv 把它当成一等字段：解析
+（链接的 `encryption=`、Clash YAML 的 `encryption:`）、逐目标落地、并计入去重指纹
+（同一服务器、不同认证公钥的节点不会被合并）。
+
+它和 `flow: xtls-rprx-vision` 还有一层约束：**XTLS Vision 只允许出现在「tcp + TLS / REALITY」
+或「已启用 VLESS Encryption」两种情况**。所以 `type=ws` + `flow=xtls-rprx-vision` +
+`encryption=…` 是**合法**组合；而一旦 `encryption` 在中间层丢失，mihomo 会直接拒绝该节点：
+
+```
+vision: not a valid supported TLS connection
+```
+
+subconv 对这种「带 vision、但既不是 tcp+TLS 也没开 encryption」的节点也会告警 —— 它正是识别
+「中间层丢字段」最直接的信号。
 
 ## 快速开始
 
@@ -632,7 +692,7 @@ Clash 侧有两个前提要知道：
 |---|---|
 | shadowsocks | `ss://base64url(method:password)@host:port?plugin=...#名称`（SIP002；插件串原样回写） |
 | vmess | `vmess://base64(JSON)`，18 个键、值全为字符串、键序固定 |
-| vless | `vless://uuid@host:port?encryption=none&security=tls\|reality&…`（reality 带 `pbk`/`sid`/`spx`；<br>xhttp 带 `type=xhttp&mode=…&extra=<JSON>`；`--probe-cert` 额外带 `pcs=<证书指纹>`） |
+| vless | `vless://uuid@host:port?encryption=<VLESS 加密串\|none>&security=tls\|reality&…`（reality 带 `pbk`/`sid`/`spx`；<br>xhttp 带 `type=xhttp&mode=…&extra=<JSON>`；`--probe-cert` 额外带 `pcs=<证书指纹>`） |
 | trojan | `trojan://password@host:port?security=tls&sni=…&type=…` |
 | hysteria2 | `hysteria2://password@host:port?sni=…&obfs=salamander&obfs-password=…#名称` |
 | socks5 | `socks://base64url(user:password)@host:port#名称` |
@@ -910,6 +970,13 @@ http://127.0.0.1:25500/?url=<订阅链接>&target=clash&auto=1
    就能看出哪些是真的活节点。
 4. **sing-box 目标节点特别少**：sing-box 没有 xhttp 传输（`sing-box check` 会报
    `unknown transport type: xhttp`），xhttp 节点会被跳过并告警 —— 这种订阅请用 `-t clash` / `-t xray`。
+5. **中间层吃掉了 `encryption`**：节点是 VLESS Encryption（`encryption=mlkem768x25519plus.…`）
+   时，**丢了这个参数不会有任何报错** —— 服务端解不开 VLESS 头部，既不回包也不关连接，客户端
+   只能等到 dial timeout。特征是「同一份节点直接给 mihomo 能用，过一次订阅转换就全超时」。
+   查两处：产物里 vless 节点有没有 `encryption:`（或链接里的 `encryption=`），以及日志里有没有
+   `vision: not a valid supported TLS connection`（mihomo 在「带 `flow: xtls-rprx-vision` 但没有
+   encryption、又不是 tcp+TLS」时的报错）—— 详见
+   「[VLESS Encryption](#vless-encryption为什么节点连不上却没有任何报错)」。
 
 **粘贴 Clash YAML 报 `yaml-cpp: error at line 77, column 1: end of map not found`** —— 先看**缩进**：
 YAML 靠行首空格表达层级，内容一旦被整段去掉缩进（自己写脚本 `trim` 每行再拼接、过一遍会吃掉行首
@@ -951,8 +1018,9 @@ User-Agent 被拦（`--ua` 换成对应客户端的 UA），临时可加 `--no-c
 | xray | Xray-core | v26.9.9 | `Configuration OK.` |
 | singbox | sing-box | v1.14.0 | exit 0 |
 
-单元测试：**865 项断言全部通过**（含 HTTP 请求映射、转换核心、控制台编码、CA bundle 不变式、
-xhttp 的解析/输出/往返与证书指纹、JSON 版 Clash 配置的嗅探与解析、去缩进 YAML 的报错信息）。
+单元测试：**937 项断言全部通过**（含 HTTP 请求映射、转换核心、控制台编码、CA bundle 不变式、
+xhttp 的解析/输出/往返与证书指纹、VLESS Encryption 的块校验与四目标透传、
+JSON 版 Clash 配置的嗅探与解析、去缩进 YAML 的报错信息）。
 
 除内置夹具（19 节点，含 `vless` + `network: xhttp` + `download-settings`）外，还用真实机场
 订阅（一元机场，2026-09 的 Clash 订阅：18 个 `vless` + `xhttp` 节点 + 2 个占位节点）做了端到端
@@ -978,10 +1046,36 @@ xhttp 的解析/输出/往返与证书指纹、JSON 版 Clash 配置的嗅探与
 > （`peer cert is invalid (against root CAs and verifyPeerCertByName)`，客户端里就是全是 `-1`），
 > 详见「[证书校验](#证书校验为什么同一份订阅在-clash-里能用在-xray-里全是--1)」。
 
+### VLESS Encryption 的端到端校验（2026-09）
+
+单个真实节点：`encryption=mlkem768x25519plus.native.0rtt.<1610 字符认证公钥>` +
+`type=ws` + `security=tls` + `flow=xtls-rprx-vision`，服务器是 Cloudflare tunnel 域名。
+四个目标产物里落地的 encryption **与源串逐字节相同**（1610/1610）：
+
+| 目标 | 落点 | 一致性 |
+|---|---|---|
+| clash | `proxies[].encryption` | ✅ 1610 字节 |
+| xray | `outbounds[].settings.vnext[0].users[0].encryption` | ✅ 1610 字节（`flow` 同时保留） |
+| links | query 的 `encryption=` | ✅ 1610 字节 |
+| v2rayn | `ProtoExtraObj.VlessEncryption` | ✅ 1610 字节 |
+
+内核侧对照实验（mihomo **v1.19.31** / Xray **26.3.27** / sing-box **1.14.1**）：
+
+| 场景 | 结果 |
+|---|---|
+| `encryption` + `flow` 都在 | `HTTP/1.1 204 No Content`，出口 `151.241.88.97`（ByteVirt LLC，US Salt Lake City），~5.6–7.3 Mbps |
+| 去掉 `encryption` | **一句报错都没有**：服务端解不开 VLESS 头部，既不回包也不关连接，客户端一路等到 dial timeout |
+| 保留 `flow`、去掉 `encryption` | mihomo 直接拒绝该节点：`vision: not a valid supported TLS connection` |
+| sing-box 1.14.1 | 内核二进制里搜不到 `mlkem768x25519plus`，node 被跳过并告警（不是产出加载不了的配置） |
+
+这正是这段代码存在的理由：节点直连 mihomo 能用，过一层订阅转换就全部超时，而中间那层此前把
+没见过的 `encryption` 参数丢掉了 —— 丢一个内核扩展字段不会报错，只会让所有节点变成「死的」。
+详见「[VLESS Encryption](#vless-encryption为什么节点连不上却没有任何报错)」。
+
 ## 开发与测试
 
 ```powershell
-.\build.ps1 -Test                                  # 构建 + 跑单元测试（Windows 上 865 断言）
+.\build.ps1 -Test                                  # 构建 + 跑单元测试（Windows 上 937 断言）
 .\build\subconv_tests.exe                          # 只跑测试（需已构建）
 node tools\check-web-input.mjs                     # 校验 Web UI 输入框切分（CI 也会跑）
 
@@ -1164,9 +1258,10 @@ subconv-v1.0-linux-x86_64/
 ├─ build.ps1                 Windows 本地构建脚本（MSYS2 原生，-Test / -Clean / -Config / -BuildDir）
 ├─ build.sh                  Linux / Termux 构建脚本（--test / --clean / --vendor-yaml / --prefix）
 ├─ .github/workflows/build.yml  多平台矩阵构建 + 自动版本号 + 发布
-├─ include/subconv/          公共头（types / error / codec / yaml / json / fsutil / convert / fetch / server / console）
+├─ include/subconv/          公共头（types / error / codec / yaml / json / fsutil / convert / fetch / server / console / vless_encryption）
 ├─ src/
-│  ├─ core/                  数据模型、文件与编码工具（console.cpp：控制台代码页适配）
+│  ├─ core/                  数据模型、文件与编码工具（console.cpp：控制台代码页适配；
+│  │                        vless_encryption.cpp：VLESS Encryption 块的校验与规范化）
 │  ├─ codec/                 Base64、percent-encoding、URI、字符串工具
 │  ├─ parse/                 各协议分享链接 → ProxyNode（uri_common 公共参数映射、clash_yaml 上游配置输入）
 │  ├─ fetch/                 libcurl 抓取、内容嗅探、磁盘缓存、离线降级
@@ -1194,6 +1289,9 @@ subconv-v1.0-linux-x86_64/
 - **中间模型统一**：所有协议先解析成 `ProxyNode`，再由各目标渲染器映射，避免字符串拼接。
 - **按内核能力裁剪**：Xray 不支持 hysteria2/tuic/ssr/snell，sing-box 不支持 ssr/snell，
   转换时按目标跳过并透出告警，而不是生成加载不了的配置。
+- **不认识的扩展字段也不丢**：VLESS 的 `encryption`、XHTTP 的 `extra` 这类内核扩展参数会原样
+  透传到各目标，校验层只告警、不改写（转换器丢一个内核扩展字段，客户端往往表现为「全部超时」
+  而不是报错，没线索可查）。
 - **手写 YAML 输出器**：Clash 配置对 key 顺序与引号敏感，手写才能保证输出确定、可读、可校验。
 - **手写 Base64 编解码**：订阅场景里 Base64 变体极多（URL-safe、缺 padding、二次包裹、含空白），
   必须自行掌控容错策略。
@@ -1222,6 +1320,10 @@ subconv-v1.0-linux-x86_64/
 - **传输层能力差异**：`network: xhttp` 在 mihomo 里**只支持 vless 出站**（vmess / trojan 会被
   跳过并告警）；**sing-box 1.14 根本没有 xhttp**（`sing-box check` 报 `unknown transport type`），
   这些节点在 `singbox` 目标会被跳过而不是降级成 tcp。反之原版 Clash / 老版本 mihomo 也不认 xhttp。
+- **VLESS Encryption（`encryption=mlkem768x25519plus.…`）是 Xray / mihomo 的扩展**：mihomo 与
+  Xray 都认，**sing-box 1.14 不认**（这些节点会被跳过而不是产出加载不了的配置）。**丢了它不会报错、
+  只会静默超时**：服务端解不开 VLESS 头部就既不回包也不关连接，客户端一路等到 dial timeout ——
+  详见「[VLESS Encryption](#vless-encryption为什么节点连不上却没有任何报错)」。
 - **`--probe-cert` 会主动连接节点**：默认关闭（转换器平时只做本地转换），且需要在构建时找到
   OpenSSL；探不到的节点只是告警，不会让转换失败。
 - **原版 Clash 语法**（`--clash-legacy`）不支持 vless / hysteria2 / tuic / ssr / snell，
@@ -1258,7 +1360,7 @@ Release 里的 Windows 包不是在这台机器上编的，而是 CI 用 **Linux
 | 工具链 | llvm-mingw **20260908**（clang **23.1.1** + lld，UCRT + libc++），一份含 x86_64 / aarch64 |
 | 交叉依赖 | OpenSSL **3.5.1**（`no-asm no-module`）+ libcurl **8.15.0**（静态、砍掉 zlib/brotli/zstd/nghttp2/libssh2…），由 `tools/build-windows-deps.sh` 现编并缓存 |
 | yaml-cpp | 0.8.0 源码静态编入（`-DSUBCONV_VENDOR_YAMLCPP=ON`） |
-| 跑测试 | CI 不跑 Windows 产物；靠架构断言（`coff-x86-64` / `coff-arm64`）确认产物是对的平台。要跑测试就在 Windows 上执行 `subconv_tests.exe`（865 项断言）或用 MSYS2 本地构建 |
+| 跑测试 | CI 不跑 Windows 产物；靠架构断言（`coff-x86-64` / `coff-arm64`）确认产物是对的平台。要跑测试就在 Windows 上执行 `subconv_tests.exe`（937 项断言）或用 MSYS2 本地构建 |
 | exe 依赖 | 只有系统 DLL：`KERNEL32` / `USER32` / `ADVAPI32` / `WS2_32` / `CRYPT32` / `bcrypt` + UCRT 的 `api-ms-win-crt-*`，第三方 DLL 一个都不带 |
 
 代码本身是平台无关的：平台相关的地方都收在几处 `#ifdef _WIN32` 里 ——
