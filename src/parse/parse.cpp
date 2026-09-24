@@ -1,6 +1,7 @@
 // 解析总入口：协议分发 + 订阅内容归一化
 #include "subconv/codec.hpp"
 #include "subconv/convert.hpp"
+#include "subconv/fetch.hpp"
 #include "parsers.hpp"
 
 namespace subconv {
@@ -133,8 +134,14 @@ Result<Subscription> parse_subscription(std::string_view raw, std::string source
   const std::string content = normalize_subscription(raw);
   if (content.empty()) return fail("订阅内容为空");
   if (content.find("://") == std::string::npos) {
-    return fail("订阅内容中未发现分享链接（可能是 Clash YAML / sing-box JSON 等格式，"
-                "将在后续里程碑支持）");
+    // 整体 Base64 包裹的配置文件：normalize_subscription 已经把包裹解开，
+    // 露出来的是 JSON 就按 Xray JSON 配置再试一次（有些面板把配置整体编码后下发）。
+    const char first = content.front();
+    if (first == '{' || first == '[') {
+      if (auto sub_json = parse_xray_json(content, sub.source)) return sub_json;
+    }
+    return fail("订阅内容中未发现分享链接（可能是 Clash YAML / Xray JSON / sing-box JSON 等格式，"
+                "请直接作为文件或链接输入；Xray JSON 配置已支持，sing-box JSON 暂不支持）");
   }
 
   std::size_t index = 0;

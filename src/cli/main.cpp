@@ -46,7 +46,8 @@ void print_usage(std::FILE* out) {
 
 输入:
   -i, --input <路径|URL>   输入订阅，可重复（多个输入会合并）
-                           支持：分享链接列表（含 Base64 包裹）、Clash YAML
+                           支持：分享链接列表（含 Base64 包裹）、Clash YAML、
+                                 Xray JSON 配置（含面板 ?app=xray 的配置数组）
 
 输出:
   -t, --target <名称>      输出目标，默认 clash（别名见 --list-targets）

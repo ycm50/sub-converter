@@ -1,7 +1,8 @@
 # subconv — 用 C++ 写的订阅转换工具
 
 把机场订阅（`ss` / `ssr` / `vmess` / `vless` / `trojan` / `hysteria` / `hysteria2` / `tuic` /
-`snell` / `socks5` / `http` 分享链接、Clash YAML）转换成各客户端可直接加载的配置，并提供兼容
+`snell` / `socks5` / `http` 分享链接、Clash YAML、Xray 的 JSON 客户端配置）转换成各客户端
+可直接加载的配置，并提供兼容
 [subconverter](https://github.com/tindy2013/subconverter) 的 HTTP `/sub` 接口与内置 Web UI。
 
 - **三种用法**：命令行、HTTP 接口（`/sub`、`/clash`、`/xray`、`/sing-box`）、浏览器界面（`serve`）。
@@ -43,7 +44,8 @@
 
 ## 特性
 
-- **协议覆盖全**：11 种分享链接形态 + 上游 Clash YAML（含 JSON 版），含 vmess 的 ws/grpc/h2/http、
+- **协议覆盖全**：11 种分享链接形态 + 上游 Clash YAML（含 JSON 版）+ Xray 的 JSON 客户端配置，
+  含 vmess 的 ws/grpc/h2/http、
   vless 的 reality、**vless 的 xhttp（含 `download-settings` 上下行分流）**、**vless 的
   `encryption`（VLESS Encryption / XTLS Vision Seed）**、ss 的 obfs / v2ray-plugin、
   hysteria2 的 obfs 等传输细节。
@@ -94,6 +96,15 @@
 > 就既不回包也不关连接）。现在链接 / Clash YAML 两种输入都解析它，clash / xray / links / v2rayn
 > 四个目标都原样透传并计入去重指纹，sing-box 目标明确跳过并告警 —— 见
 > 「[VLESS Encryption](#vless-encryption为什么节点连不上却没有任何报错)」。
+>
+> **2026-09 补充 4**：支持把 **Xray 的 JSON 客户端配置**当输入源 —— 面板的 `?app=xray` 端点下发的
+> 就是它（**一份配置里只装一个节点，整份订阅是一个配置数组**，节点名放在根级 `remarks`）。
+> 以前这会被当成「不支持的 JSON 配置」整体拒掉，于是面板给的 Xray 链接在 Clash / sing-box 侧
+> 完全用不了。现在出站（vless / vmess / trojan / shadowsocks / socks / http）连同
+> ws / grpc / h2 / http / xhttp 传输、TLS / REALITY、证书指纹一起还原成节点，clash / xray /
+> singbox / links / v2rayn 五个目标都能消费；**整体 Base64 包裹的 JSON 配置**也一并支持。
+> sing-box 的 JSON 配置（出站用 `type`）依旧明确报错，不再与 Xray 混为一谈 —— 见
+> 「[支持的输入形态](#支持的输入形态)」。
 
 **目标优先级**：Clash(mihomo) → Xray → sing-box。
 
@@ -108,7 +119,8 @@
 | 分享链接列表 | 每行一条，`ss://` `ssr://` `vmess://` `vless://` `trojan://` `hysteria://` `hysteria2://`（含 `hy2://`）`tuic://` `snell://` `socks5://`（含 `socks://`）`http://` `https://`，允许空行与注释行 |
 | 整体 Base64 | 上面列表的 Base64（标准或 URL-safe、缺 padding、含空白都能解；**最多自动解两层包裹**，部分机场会二次编码；自动跳过 UTF-8 BOM） |
 | Clash YAML | 上游 Clash / mihomo 配置，取其 `proxies:` 列表（需要 yaml-cpp，见「[从源码构建](#从源码构建)」）；含 `network: xhttp` + `xhttp-opts`（含 `download-settings`）的节点会完整还原。**JSON 版的 Clash 配置也走这条路**：JSON 是 YAML 的子集，mihomo 直接吃，很多面板的 `?app=clash` 返回的就是 JSON（`content-type: application/json`） |
-| JSON 配置 | sing-box / Xray / v2ray 的 JSON 配置 ❌ 暂不支持：识别出来会**明确报错**「这是 JSON 配置而不是订阅」，而不是抛一堆语法错（Clash 方言的 JSON 见上一行） |
+| Xray JSON 配置 | Xray / V2Ray 的**完整客户端配置**：单份配置对象，或「每份配置只装一个节点」的**配置数组**（面板 `?app=xray` 返回的就是后者，节点名放在根级 Xray 并不认识的 `remarks` 里）。只取出站里能当节点用的协议（vless / vmess / trojan / shadowsocks / socks / http），还原 `settings.vnext`/`servers`、`streamSettings`（ws / grpc / h2 / http / xhttp / tcp+http-header）、`security`（tls / reality / none）、`tlsSettings`（sni / alpn / 指纹 / 证书钉扎 / allowInsecure）、`realitySettings`、`sockopt.tcpFastOpen`、xhttp 的 `downloadSettings`；`freedom` / `blackhole` / `dns` 等内置出站与 `inbounds` / `routing` / `policy` 不是节点，忽略 |
+| JSON 配置 | sing-box 的 JSON 配置 ❌ 暂不支持（它的出站用 `type` 而不是 `protocol`），识别出来会**明确报错**「这是 sing-box 的 JSON 配置」，而不是抛一堆语法错（Clash 方言与 Xray 的 JSON 见上面两行） |
 | 网页 | ❌ 识别为 HTML 时给出「机场错误页 / 需要鉴权 / 链接失效」提示 |
 
 `https://user:pass@host:port` 形式的链接会解析成**带 TLS 的 http 代理**；由于分享链接无法携带证书信息，
@@ -577,7 +589,8 @@ subconv 0.1.0 - 订阅转换工具
 
 输入:
   -i, --input <路径|URL>   输入订阅，可重复（多个输入会合并）
-                           支持：分享链接列表（含 Base64 包裹）、Clash YAML
+                           支持：分享链接列表（含 Base64 包裹）、Clash YAML、
+                                 Xray JSON 配置（含面板 ?app=xray 的配置数组）
 
 输出:
   -t, --target <名称>      输出目标，默认 clash（别名见 --list-targets）
@@ -937,9 +950,12 @@ http://127.0.0.1:25500/?url=<订阅链接>&target=clash&auto=1
 
 ## 抓取与容错
 
-- **内容嗅探**：自动区分「分享链接列表 / 整体 Base64 / Clash YAML（含 JSON 版）/ JSON 配置 / 网页」。
+- **内容嗅探**：自动区分「分享链接列表 / 整体 Base64 / Clash YAML（含 JSON 版）/ Xray JSON 配置 /
+  其它 JSON 配置 / 网页」。
   机场返回 404 网页或鉴权页时给出明确提示，而不是抛出一堆 YAML 语法错；JSON 版 Clash 配置按其中的
-  `proxies` / `proxy-groups` / `mixed-port` 等键识别出来，交给 Clash 解析器而不是当成「不支持的 JSON 配置」。
+  `proxies` / `proxy-groups` / `mixed-port` 等键识别出来，交给 Clash 解析器而不是当成「不支持的 JSON 配置」；
+  Xray 的 JSON 客户端配置靠出站的 `protocol`（`streamSettings` / `vnext` / `remarks` 等标志键）认出来，
+  sing-box 的 `outbounds[].type` 则会明说「暂不支持」—— 两种 JSON 不会再混为一谈。
 - **磁盘缓存**：默认 `%TEMP%\subconv-cache`，同一订阅在 TTL 内不重复请求。
 - **离线降级**：网络失败时自动回落到任意龄期的本地缓存，并在告警里说明。
 - **`subscription-userinfo`**：解析流量与到期信息并汇总输出到 stderr，同时作为响应头透传给客户端。
@@ -1018,9 +1034,9 @@ User-Agent 被拦（`--ua` 换成对应客户端的 UA），临时可加 `--no-c
 | xray | Xray-core | v26.9.9 | `Configuration OK.` |
 | singbox | sing-box | v1.14.0 | exit 0 |
 
-单元测试：**937 项断言全部通过**（含 HTTP 请求映射、转换核心、控制台编码、CA bundle 不变式、
+单元测试：**1049 项断言全部通过**（含 HTTP 请求映射、转换核心、控制台编码、CA bundle 不变式、
 xhttp 的解析/输出/往返与证书指纹、VLESS Encryption 的块校验与四目标透传、
-JSON 版 Clash 配置的嗅探与解析、去缩进 YAML 的报错信息）。
+JSON 版 Clash 配置与 Xray JSON 配置的嗅探/解析/端到端输出、去缩进 YAML 的报错信息）。
 
 除内置夹具（19 节点，含 `vless` + `network: xhttp` + `download-settings`）外，还用真实机场
 订阅（一元机场，2026-09 的 Clash 订阅：18 个 `vless` + `xhttp` 节点 + 2 个占位节点）做了端到端
@@ -1041,6 +1057,16 @@ JSON 版 Clash 配置的嗅探与解析、去缩进 YAML 的报错信息）。
 |---|---|---|
 | JSON 版 Clash 当输入 | `subconv <board-url>?app=clash -t clash` | 解析 8 节点，`ws-opts` / `servername` 与原配置一致 |
 | 三目标内核校验 | `validate.ps1 -Source bpb-clash.json -Target clash/xray/singbox` | mihomo `test is successful` / Xray `Configuration OK.` / sing-box exit 0 |
+
+第三份输入是同一面板的 `?app=xray` 接口（BPB，**Xray 客户端配置数组**）：9 份配置，前 8 份各装
+一个节点（4 `vless` + 4 `trojan`，全是 `network: ws` + `security: tls`），第 9 份是「Best Ping」
+均衡配置、把 8 个出站又装了一遍，所以解析出 16 个节点、去重后 8 个：
+
+| 验证 | 命令 | 结果 |
+|---|---|---|
+| Xray JSON 当输入 | `subconv '<board-url>?app=xray' -t clash` | 解析 16 节点 → 去重 8 个，`ws-opts` / `servername` / `alpn` / `client-fingerprint` 与原配置逐字段一致 |
+| 三目标内核校验 | `validate.ps1 -Source bpb-xray.json -Target clash/xray/singbox` | mihomo `test is successful` / Xray `Configuration OK.` / sing-box exit 0 |
+| xray 节点可用 | `xray run`（入站端口挪到 11808）+ `curl --socks5-hostname 127.0.0.1:11808 http://www.gstatic.com/generate_204` | 连续 3 次 `HTTP/1.1 204 No Content` —— 解析没有丢字段 |
 
 > 关于 `-ProbeCert`：不加它时 xray 产物里的节点会因为「证书与 SNI 对不上」**全部握手失败**
 > （`peer cert is invalid (against root CAs and verifyPeerCertByName)`，客户端里就是全是 `-1`），
@@ -1263,7 +1289,9 @@ subconv-v1.0-linux-x86_64/
 │  ├─ core/                  数据模型、文件与编码工具（console.cpp：控制台代码页适配；
 │  │                        vless_encryption.cpp：VLESS Encryption 块的校验与规范化）
 │  ├─ codec/                 Base64、percent-encoding、URI、字符串工具
-│  ├─ parse/                 各协议分享链接 → ProxyNode（uri_common 公共参数映射、clash_yaml 上游配置输入）
+│  ├─ parse/                 各协议分享链接 → ProxyNode（uri_common 公共参数映射）
+│  │                        clash_yaml.cpp：上游 Clash YAML / JSON 版配置输入
+│  │                        xray_json.cpp：Xray / V2Ray 的 JSON 客户端配置输入（含配置数组）
 │  ├─ fetch/                 libcurl 抓取、内容嗅探、磁盘缓存、离线降级
 │  │                        certprobe.cpp：--probe-cert 的 OpenSSL 证书指纹探测（可选依赖）
 │  ├─ emit/                  渲染器：clash / xray / singbox / 分享链接 / 规则集 / DNS
@@ -1335,9 +1363,16 @@ subconv-v1.0-linux-x86_64/
 - `GEOIP` 规则需要 `geoip.metadb`；mihomo 首次加载会自动下载，离线环境请手动放置。
 - **`v2rayn` 是单向输出**：项目里没有 `v2rayn://` 的**输入**解析器，所以它无法参与往返测试，
   只能靠 `tools/verify-v2rayn.ps1` 重放两端逻辑验证。
-- **WG / JSON 配置输入未实现**：`wireguard://`、`wg://` 会被识别但跳过；把 Xray / sing-box 的
-  JSON 配置当输入会得到明确报错。**Clash 方言的 JSON**（面板 `?app=clash` 返回的那种）已经支持 ——
-  它按 Clash YAML 解析，因为 JSON 就是 YAML 的子集。
+- **WG / sing-box JSON 配置输入未实现**：`wireguard://`、`wg://` 会被识别但跳过；sing-box 的
+  JSON 配置（`outbounds[].type`）当输入会得到明确报错。
+  * **Clash 方言的 JSON**（面板 `?app=clash` 返回的那种）已经支持 —— 它按 Clash YAML 解析，
+    因为 JSON 就是 YAML 的子集；
+  * **Xray 的 JSON 客户端配置**（`outbounds[].protocol`，含面板 `?app=xray` 那种配置数组）已经支持，
+    但它是「客户端配置」而不是「节点」，只按节点语义取值：`mux`、`streamSettings.fragment`
+    与 `sockopt.domainStrategy` 有意丢弃（都不影响能否连通）；
+    * 未知传输层（如 `httpupgrade`）与 `dialerProxy`（链式代理）会**跳过节点并告警** ——
+      与其产出一条连不上的线，不如说清楚；
+    * kcp 的 `header` / `seed` 没有建模，遇到会告警但保留节点（服务端非默认配置时可能连不上）。
 
 ## 构建环境
 

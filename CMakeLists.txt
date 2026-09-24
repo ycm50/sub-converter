@@ -206,6 +206,7 @@ add_library(subconv_core STATIC
   src/parse/snell.cpp
   src/parse/uri_common.cpp
   src/parse/clash_yaml.cpp
+  src/parse/xray_json.cpp
   src/parse/parse.cpp
   src/fetch/http.cpp
   src/fetch/certprobe.cpp

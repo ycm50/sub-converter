@@ -1132,6 +1132,334 @@ proxies:
 }
 
 // ---------------------------------------------------------------------------
+void test_xray_json_input() {
+  section("Xray JSON 配置作为输入源");
+  using subconv::fetch::ContentKind;
+  using subconv::Network;
+  using subconv::Protocol;
+
+  // --- 嗅探：Xray 配置走 Xray 解析器；sing-box / 只有空 outbounds 的仍是「不支持的 JSON」---
+  CHECK(subconv::fetch::sniff_content(
+            R"({"outbounds":[{"protocol":"vless","settings":{"vnext":[]}}]})") ==
+        ContentKind::XrayJson);
+  CHECK(subconv::fetch::sniff_content(
+            R"([{"remarks":"a","outbounds":[{"protocol":"trojan","settings":{"servers":[]}}]}])") ==
+        ContentKind::XrayJson);
+  // 只有 streamSettings 没有 protocol（少见但合法）也要认出来
+  CHECK(subconv::fetch::sniff_content(
+            R"({"outbounds":[{"streamSettings":{"network":"ws"}}]})") == ContentKind::XrayJson);
+  CHECK(subconv::fetch::sniff_content(R"({"outbounds":[]})") == ContentKind::JsonConfig);
+  CHECK(subconv::fetch::sniff_content(
+            R"({"outbounds":[{"type":"vless","tag":"a","server":"h","server_port":443}]})") ==
+        ContentKind::JsonConfig);
+  // JSON 版 Clash 配置不能被 Xray 分支抢走
+  CHECK(subconv::fetch::sniff_content(
+            R"({"mixed-port":7890,"proxies":[{"name":"a","type":"vless","uuid":"u"}]})") ==
+        ContentKind::ClashYaml);
+
+  // --- BPB 面板 ?app=xray 的形态：数组，每份配置一个节点，根级 remarks 就是节点名 ---
+  const std::string bpb = R"([
+    {
+      "remarks": "💦 1. VLESS - Domain : 443",
+      "log": { "loglevel": "warning" },
+      "inbounds": [ { "listen": "127.0.0.1", "port": 10808, "protocol": "mixed", "tag": "mixed-in" } ],
+      "outbounds": [
+        {
+          "protocol": "vless",
+          "settings": { "vnext": [ { "address": "a.example.com", "port": 443,
+            "users": [ { "id": "b831381d-6324-4d53-ad4f-8cda48b30811", "encryption": "none" } ] } ] },
+          "streamSettings": {
+            "network": "ws",
+            "wsSettings": { "host": "a.example.com", "path": "/vl/abc?ed=2560" },
+            "security": "tls",
+            "tlsSettings": { "serverName": "A.eXample.COM", "fingerprint": "chrome",
+                             "alpn": [ "http/1.1" ] },
+            "sockopt": { "domainStrategy": "UseIP", "tcpFastOpen": true }
+          },
+          "tag": "proxy"
+        },
+        { "protocol": "dns", "settings": { "rules": [ { "action": "hijack" } ] }, "tag": "dns-out" },
+        { "protocol": "freedom", "settings": { "domainStrategy": "UseIP" }, "tag": "direct" },
+        { "protocol": "blackhole", "settings": { "response": { "type": "http" } }, "tag": "block" }
+      ],
+      "routing": { "domainStrategy": "IPIfNonMatch",
+                   "rules": [ { "network": "tcp", "outboundTag": "proxy", "type": "field" } ] }
+    },
+    {
+      "remarks": "💦 2. Trojan - Domain : 443",
+      "outbounds": [
+        {
+          "protocol": "trojan",
+          "settings": { "servers": [ { "address": "b.example.com", "port": 443, "password": "tj-pw" } ] },
+          "streamSettings": {
+            "network": "ws",
+            "wsSettings": { "path": "/tj" },
+            "security": "tls",
+            "tlsSettings": { "serverName": "b.example.com", "allowInsecure": true,
+                             "pinnedPeerCertSha256": "AA:BB:CC" }
+          },
+          "tag": "proxy-1"
+        }
+      ]
+    }
+  ])";
+  CHECK(subconv::fetch::sniff_content(bpb) == ContentKind::XrayJson);
+
+  auto sub = subconv::fetch::parse_content(bpb, "bpb");
+  CHECK(sub.has_value());
+  if (!sub) return;
+  // freedom / blackhole / dns 是客户端内置出站，不该当成节点，也不该刷告警
+  CHECK_EQ(sub->nodes.size(), static_cast<std::size_t>(2));
+  CHECK_EQ(sub->warnings.size(), static_cast<std::size_t>(0));
+
+  const auto& vl = sub->nodes[0];
+  CHECK_EQ(vl.name, std::string("💦 1. VLESS - Domain : 443"));
+  CHECK(vl.protocol == Protocol::Vless);
+  CHECK_EQ(vl.server, std::string("a.example.com"));
+  CHECK_EQ(vl.port, static_cast<uint16_t>(443));
+  CHECK_EQ(vl.uuid, std::string("b831381d-6324-4d53-ad4f-8cda48b30811"));
+  CHECK(vl.encryption.empty());  // encryption=none 折成空串
+  CHECK(vl.network == Network::Ws);
+  CHECK_EQ(vl.ws.path, std::string("/vl/abc?ed=2560"));
+  CHECK_EQ(vl.ws.host, std::string("a.example.com"));
+  CHECK(vl.tls.enabled);
+  CHECK(!vl.tls.reality);
+  CHECK_EQ(vl.tls.sni, std::string("A.eXample.COM"));  // 原样透传，不改大小写
+  CHECK_EQ(vl.tls.client_fingerprint, std::string("chrome"));
+  CHECK_EQ(vl.tls.alpn.size(), static_cast<std::size_t>(1));
+  CHECK(vl.tfo);  // sockopt.tcpFastOpen
+
+  const auto& tj = sub->nodes[1];
+  CHECK_EQ(tj.name, std::string("💦 2. Trojan - Domain : 443"));
+  CHECK(tj.protocol == Protocol::Trojan);
+  CHECK_EQ(tj.password, std::string("tj-pw"));
+  CHECK(tj.tls.enabled);
+  CHECK(tj.tls.insecure);                                        // allowInsecure
+  CHECK_EQ(tj.tls.fingerprint, std::string("AA:BB:CC"));          // pinnedPeerCertSha256
+
+  // --- 端到端：Xray JSON 进 → clash / xray / 分享链接出 ---
+  subconv::EmitOptions co;
+  co.target = "clash";
+  auto clash = subconv::emit_config(sub->nodes, co);
+  CHECK(clash.has_value());
+  if (clash) {
+    CHECK(clash->find("type: vless") != std::string::npos);
+    CHECK(clash->find("type: trojan") != std::string::npos);
+    CHECK(clash->find("servername: A.eXample.COM") != std::string::npos);
+    CHECK(clash->find("client-fingerprint: chrome") != std::string::npos);
+    CHECK(clash->find("path: /vl/abc?ed=2560") != std::string::npos);
+    CHECK(clash->find("tfo: true") != std::string::npos);
+    CHECK(clash->find("skip-cert-verify: true") != std::string::npos);
+  }
+  subconv::EmitOptions xo;
+  xo.target = "xray";
+  auto xray = subconv::emit_config(sub->nodes, xo);
+  CHECK(xray.has_value());
+  if (xray) {
+    CHECK(xray->find("\"protocol\": \"vless\"") != std::string::npos);
+    CHECK(xray->find("pinnedPeerCertSha256") != std::string::npos);
+    CHECK(xray->find("AA:BB:CC") != std::string::npos);
+  }
+  subconv::EmitOptions lo;
+  lo.target = "links";
+  auto links = subconv::emit_config(sub->nodes, lo);
+  CHECK(links.has_value());
+  if (links) {
+    CHECK(links->find("vless://b831381d-6324-4d53-ad4f-8cda48b30811@a.example.com:443") !=
+          std::string::npos);
+    CHECK(links->find("trojan://tj-pw@b.example.com:443") != std::string::npos);
+    // 往返：自己生成的链接要能被自己解析回来
+    auto back = subconv::parse_subscription(*links, "roundtrip");
+    CHECK(back.has_value());
+    if (back) {
+      CHECK_EQ(back->nodes.size(), static_cast<std::size_t>(2));
+      if (back->nodes.size() == 2) {
+        CHECK(back->nodes[0].protocol == Protocol::Vless);
+        CHECK_EQ(back->nodes[0].ws.path, std::string("/vl/abc?ed=2560"));
+        CHECK(back->nodes[1].tls.insecure);
+      }
+    }
+  }
+
+  // --- vmess + reality + grpc：ALTER ID / 传输 / REALITY 参数 ---
+  const std::string vmess_reality = R"({
+    "remarks": "VMess REALITY",
+    "outbounds": [ {
+      "protocol": "vmess",
+      "settings": { "vnext": [ { "address": "c.example.com", "port": 8443,
+        "users": [ { "id": "b831381d-6324-4d53-ad4f-8cda48b30812", "alterId": 64,
+                     "security": "auto" } ] } ] },
+      "streamSettings": {
+        "network": "grpc",
+        "grpcSettings": { "serviceName": "gsvc", "multiMode": true },
+        "security": "reality",
+        "realitySettings": { "serverName": "www.microsoft.com", "fingerprint": "chrome",
+                             "publicKey": "PUBKEY123", "shortId": "abcd", "spiderX": "/spx" }
+      },
+      "tag": "vm"
+    } ]
+  })";
+  auto vr = subconv::parse_xray_json(vmess_reality, "t");
+  CHECK(vr.has_value());
+  if (vr) {
+    CHECK_EQ(vr->nodes.size(), static_cast<std::size_t>(1));
+    if (!vr->nodes.empty()) {
+      const auto& n = vr->nodes[0];
+      CHECK_EQ(n.name, std::string("VMess REALITY"));
+      CHECK(n.protocol == Protocol::Vmess);
+      CHECK_EQ(n.alter_id, 64);
+      CHECK_EQ(n.cipher, std::string("auto"));
+      CHECK(n.network == Network::Grpc);
+      CHECK_EQ(n.grpc.service_name, std::string("gsvc"));
+      CHECK(n.grpc.multi_mode);
+      CHECK(n.tls.reality);
+      CHECK_EQ(n.tls.reality_public_key, std::string("PUBKEY123"));
+      CHECK_EQ(n.tls.reality_short_id, std::string("abcd"));
+      CHECK_EQ(n.tls.sni, std::string("www.microsoft.com"));
+      CHECK_EQ(n.tls.client_fingerprint, std::string("chrome"));
+      const auto spider = n.extra.find("spiderX");
+      CHECK(spider != n.extra.end());
+      if (spider != n.extra.end()) CHECK_EQ(spider->second, std::string("/spx"));
+    }
+  }
+
+  // --- ss / socks / http 的 servers 形态 + 没有 remarks 时用出站 tag 当名字 ---
+  const std::string servers = R"({
+    "outbounds": [
+      { "protocol": "shadowsocks", "tag": "SS-1",
+        "settings": { "servers": [ { "address": "d.example.com", "port": 8388,
+                                     "method": "aes-256-gcm", "password": "ss-pw" } ] } },
+      { "protocol": "socks", "tag": "SOCKS-1",
+        "settings": { "servers": [ { "address": "e.example.com", "port": 1080,
+                                     "users": [ { "user": "u1", "pass": "p1" } ] } ] } },
+      { "protocol": "http", "tag": "HTTP-1",
+        "settings": { "servers": [ { "address": "f.example.com", "port": 8080 } ] } }
+    ]
+  })";
+  auto sv = subconv::parse_xray_json(servers, "t");
+  CHECK(sv.has_value());
+  if (sv) {
+    CHECK_EQ(sv->nodes.size(), static_cast<std::size_t>(3));
+    if (sv->nodes.size() == 3) {
+      CHECK_EQ(sv->nodes[0].name, std::string("SS-1"));
+      CHECK(sv->nodes[0].protocol == Protocol::Shadowsocks);
+      CHECK_EQ(sv->nodes[0].cipher, std::string("aes-256-gcm"));
+      CHECK_EQ(sv->nodes[0].password, std::string("ss-pw"));
+      CHECK_EQ(sv->nodes[1].name, std::string("SOCKS-1"));
+      CHECK(sv->nodes[1].protocol == Protocol::Socks5);
+      CHECK_EQ(sv->nodes[1].username, std::string("u1"));
+      CHECK_EQ(sv->nodes[1].password, std::string("p1"));
+      CHECK_EQ(sv->nodes[2].name, std::string("HTTP-1"));
+      CHECK(sv->nodes[2].protocol == Protocol::Http);
+    }
+  }
+
+  // --- xhttp + downloadSettings（上传走主节点、下载走另一台） ---
+  const std::string xhttp = R"({
+    "remarks": "XHTTP",
+    "outbounds": [ {
+      "protocol": "vless",
+      "settings": { "vnext": [ { "address": "g.example.com", "port": 443,
+        "users": [ { "id": "b831381d-6324-4d53-ad4f-8cda48b30813", "encryption": "none" } ] } ] },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "/xh", "host": "g.example.com", "mode": "stream-one",
+          "extra": { "downloadSettings": {
+            "address": "h.example.com", "port": 8443, "network": "xhttp", "security": "tls",
+            "xhttpSettings": { "path": "/dl", "host": "h2.example.com" },
+            "tlsSettings": { "serverName": "h.example.com", "pinnedPeerCertSha256": "DD:EE" } } }
+        },
+        "security": "tls",
+        "tlsSettings": { "serverName": "g.example.com" }
+      },
+      "tag": "xh"
+    } ]
+  })";
+  auto xh = subconv::parse_xray_json(xhttp, "t");
+  CHECK(xh.has_value());
+  if (xh && !xh->nodes.empty()) {
+    const auto& n = xh->nodes[0];
+    CHECK(n.network == Network::Xhttp);
+    CHECK_EQ(n.xhttp.path, std::string("/xh"));
+    CHECK_EQ(n.xhttp.host, std::string("g.example.com"));
+    CHECK_EQ(n.xhttp.mode, std::string("stream-one"));
+    CHECK_EQ(n.extra.count("xhttpExtra"), static_cast<std::size_t>(1));
+    CHECK(n.xhttp.download.present);
+    CHECK_EQ(n.xhttp.download.server, std::string("h.example.com"));
+    CHECK(n.xhttp.download.port.has_value());
+    if (n.xhttp.download.port.has_value()) {
+      CHECK_EQ(*n.xhttp.download.port, static_cast<uint16_t>(8443));
+    }
+    CHECK_EQ(n.xhttp.download.path, std::string("/dl"));
+    CHECK_EQ(n.xhttp.download.host, std::string("h2.example.com"));
+    CHECK_EQ(n.xhttp.download.sni, std::string("h.example.com"));
+    CHECK(n.xhttp.download.tls.has_value());
+    if (n.xhttp.download.tls.has_value()) CHECK(*n.xhttp.download.tls);
+    CHECK_EQ(n.xhttp.download.pinned_cert_sha256, std::string("DD:EE"));
+    // 钉了指纹就等于放行（不校链），沿用主节点那一套判断
+    CHECK(n.xhttp.download.insecure.has_value());
+    if (n.xhttp.download.insecure.has_value()) CHECK(*n.xhttp.download.insecure);
+  }
+
+  // --- 不支持的传输层：跳过节点，但要把原因说清楚（而不是产出一条连不上的线）---
+  {
+    const std::string httpupgrade = R"({
+      "outbounds": [ { "protocol": "vless",
+        "settings": { "vnext": [ { "address": "i.example.com", "port": 443,
+          "users": [ { "id": "u", "encryption": "none" } ] } ] },
+        "streamSettings": { "network": "httpupgrade",
+                            "httpupgradeSettings": { "path": "/hu" } } } ]
+    })";
+    auto hu = subconv::fetch::parse_content(httpupgrade, "t");
+    CHECK(!hu.has_value());
+    if (!hu) {
+      CHECK(hu.error().message.find("没有从 JSON 里解析出任何节点") != std::string::npos);
+      CHECK(hu.error().message.find("httpupgrade") != std::string::npos);
+    }
+  }
+
+  // --- sing-box 的 JSON 仍按「不支持」报错，但要指出是哪一种 ---
+  {
+    auto cfg = subconv::fetch::parse_content(
+        R"({"outbounds":[{"type":"vless","tag":"a","server":"h","server_port":443}]})", "t");
+    CHECK(!cfg.has_value());
+    if (!cfg) {
+      CHECK(cfg.error().message.find("sing-box") != std::string::npos);
+      CHECK(cfg.error().message.find("JSON 配置") != std::string::npos);
+    }
+  }
+
+  // --- 整体 Base64 包裹的 Xray JSON（部分面板这么下发）也要能解 ---
+  {
+    const std::string wrapped = base64_encode(vmess_reality);
+    auto decoded = subconv::parse_subscription(wrapped, "t");
+    CHECK(decoded.has_value());
+    if (decoded) {
+      CHECK_EQ(decoded->nodes.size(), static_cast<std::size_t>(1));
+      if (!decoded->nodes.empty()) {
+        CHECK(decoded->nodes[0].protocol == Protocol::Vmess);
+        CHECK(decoded->nodes[0].tls.reality);
+      }
+    }
+  }
+
+  // --- 只有内置出站的配置报错而不是静默产出空结果 ---
+  {
+    auto empty = subconv::parse_xray_json(
+        R"({"outbounds":[{"protocol":"freedom","tag":"direct"},{"protocol":"blackhole"}]})", "t");
+    CHECK(!empty.has_value());
+    if (!empty) {
+      CHECK(empty.error().message.find("没有从 JSON 里解析出任何节点") != std::string::npos);
+    }
+  }
+  // 非 JSON / 根节点类型不对
+  CHECK(!subconv::parse_xray_json("not json", "t").has_value());
+  CHECK(!subconv::parse_xray_json("42", "t").has_value());
+  CHECK(!subconv::parse_xray_json("[]", "t").has_value());
+}
+
+// ---------------------------------------------------------------------------
 // HTTP 服务：请求映射与转换核心（都是纯函数，不依赖 socket）
 // ---------------------------------------------------------------------------
 void test_server() {
@@ -2281,6 +2609,7 @@ int main() {
   test_emit_targets();
   test_sniff_and_userinfo();
   test_clash_yaml_input();
+  test_xray_json_input();
   test_server();
   test_ca_bundle();
   test_console_encoding();

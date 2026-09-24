@@ -58,6 +58,24 @@ Result<std::string> read_file(const std::string& path) {
   return buffer.str();
 }
 
+/// 是不是 Xray / V2Ray 的 JSON 配置（而不是 Clash 方言 / sing-box）。
+///
+/// 判别关键：**Xray 的出站用 `protocol`，sing-box 用 `type`**，Clash 用 `proxies`（先被排掉）；
+/// 另外 Xray 客户端配置里必然出现 `streamSettings`（或它的某个子键），
+/// 面板（BPB 等）还会在根级塞一个 Xray 不认识的 `remarks` 当节点名。
+/// 只看前 256KB 的窗口，所以大配置里排在后面的键靠 `outbounds` + `protocol` 兜住。
+bool looks_like_xray_json(const std::string& lower_head) {
+  static const char* kMarkers[] = {"\"streamsettings\"",    "\"vnext\"",
+                                   "\"remarks\"",           "\"xhttpsettings\"",
+                                   "\"splithttpsettings\"", "\"realitysettings\"",
+                                   "\"grpcsettings\""};
+  for (const char* marker : kMarkers) {
+    if (lower_head.find(marker) != std::string::npos) return true;
+  }
+  return lower_head.find("\"outbounds\"") != std::string::npos &&
+         lower_head.find("\"protocol\"") != std::string::npos;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -76,13 +94,15 @@ ContentKind sniff_content(std::string_view body, std::string_view content_type) 
 
   if (first == '{' || first == '[') {
     // JSON 是 YAML 的子集，mihomo 直接吃 JSON 版 Clash 配置。
-    // 只见 Clash 专有键就交给 Clash 解析器；sing-box / Xray / v2ray 仍按 JSON 配置报错。
+    // 只见 Clash 专有键就交给 Clash 解析器；Xray 客户端配置（含 BPB `?app=xray`
+    // 那种「每份配置一个节点」的数组）走 Xray 解析器；sing-box 仍按 JSON 配置报错。
     if (head.find("\"proxies\"") != std::string::npos ||
         head.find("\"proxy-groups\"") != std::string::npos ||
         head.find("\"proxy-providers\"") != std::string::npos ||
         head.find("\"mixed-port\"") != std::string::npos) {
       return ContentKind::ClashYaml;
     }
+    if (looks_like_xray_json(head)) return ContentKind::XrayJson;
     return ContentKind::JsonConfig;
   }
 
@@ -232,9 +252,15 @@ Result<Subscription> parse_content(std::string_view body, std::string source,
                   "）：可能是机场错误页、需要鉴权，或链接已失效。请检查订阅链接与 User-Agent。");
     case ContentKind::ClashYaml:
       return parse_clash_yaml(body, source);
+    case ContentKind::XrayJson:
+      return parse_xray_json(body, source);
     case ContentKind::JsonConfig:
-      return fail("来源是 JSON 配置（sing-box / Xray / v2ray）而不是订阅（" + source +
-                  "）：将 JSON 配置作为输入源计划在后续里程碑支持。");
+      // 嗅探只看前 256KB、且只看少量标志键 —— 这里再给 Xray 解析器一次机会
+      // （例如 outbounds 排在很后面的配置），失败再按「不支持的 JSON 配置」报错。
+      if (auto xray = parse_xray_json(body, source)) return xray;
+      return fail("来源是 JSON 配置而不是订阅（" + source +
+                  "）：这份内容里没有 Xray 的代理出站（outbounds[].protocol）；"
+                  "sing-box 的 JSON 配置（outbounds[].type）暂不支持。");
     case ContentKind::ShareLinks:
     case ContentKind::Unknown:
       break;
