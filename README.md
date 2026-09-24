@@ -21,6 +21,7 @@
   - [传输层（network）× 目标](#传输层network--目标)
   - [证书校验：为什么同一份订阅在 Clash 里能用、在 Xray 里全是 -1](#证书校验为什么同一份订阅在-clash-里能用在-xray-里全是--1)
   - [VLESS Encryption：为什么节点连不上却没有任何报错](#vless-encryption为什么节点连不上却没有任何报错)
+  - [WireGuard：能转成什么、不能转成什么](#wireguard能转成什么不能转成什么)
 - [快速开始](#快速开始)
 - [支持的平台](#支持的平台)
 - [从源码构建](#从源码构建)
@@ -44,11 +45,12 @@
 
 ## 特性
 
-- **协议覆盖全**：11 种分享链接形态 + 上游 Clash YAML（含 JSON 版）+ Xray 的 JSON 客户端配置，
+- **协议覆盖全**：12 种分享链接形态 + 上游 Clash YAML（含 JSON 版）+ Xray 的 JSON 客户端配置
+  + 标准 WireGuard `.conf`，
   含 vmess 的 ws/grpc/h2/http、
   vless 的 reality、**vless 的 xhttp（含 `download-settings` 上下行分流）**、**vless 的
   `encryption`（VLESS Encryption / XTLS Vision Seed）**、ss 的 obfs / v2ray-plugin、
-  hysteria2 的 obfs 等传输细节。
+  hysteria2 的 obfs 等传输细节，以及 **WireGuard（含 WARP 的 `reserved`）**。
 - **手写输出器**：YAML / JSON / Base64 / URI 全部自己渲染 —— 订阅场景里 Base64 变体极多，
   而 Clash 配置对 key 顺序与引号敏感，只有自己掌控才能保证输出确定、可读、可校验。
 - **两端对齐分享链接**：`links` / `base64` / `v2rayn` 的形态是逐字段核对 v2rayNG(`com.v2ray.ang.fmt.*Fmt`)
@@ -105,6 +107,15 @@
 > singbox / links / v2rayn 五个目标都能消费；**整体 Base64 包裹的 JSON 配置**也一并支持。
 > sing-box 的 JSON 配置（出站用 `type`）依旧明确报错，不再与 Xray 混为一谈 —— 见
 > 「[支持的输入形态](#支持的输入形态)」。
+>
+> **2026-09 补充 5**：支持 **WireGuard**（此前只是枚举里占了个位，链接会被跳过）。四种输入
+> 形态（v2rayN/v2rayNG 的 `wireguard://`、`wireguard-json://`、标准 wg-quick `.conf`、Clash YAML
+> 与 Xray JSON 里的 wireguard 节点）与五个目标（clash / xray / singbox / links / v2rayn）
+> 全部打通，并用 mihomo v1.19.30 / Xray v26.6.1 / sing-box v1.14.0 **三个真实内核校验通过**。
+> 三个关键点：sing-box 只产出 **1.11 起的新 `endpoints[]` 形态**（旧的扁平 outbound 1.13 已移除）；
+> 写进内核配置时**必须把 base64 密钥的 `=` 补回来**（分享链接里没有，mihomo 会直接拒绝加载）；
+> WARP 的 `reserved` 三个字节漏了会「握手成功但完全不通」。能转成什么、为什么不能转成
+> vmess/vless，见「[WireGuard](#wireguard能转成什么不能转成什么)」。
 
 **目标优先级**：Clash(mihomo) → Xray → sing-box。
 
@@ -116,8 +127,9 @@
 
 | 形态 | 说明 |
 |---|---|
-| 分享链接列表 | 每行一条，`ss://` `ssr://` `vmess://` `vless://` `trojan://` `hysteria://` `hysteria2://`（含 `hy2://`）`tuic://` `snell://` `socks5://`（含 `socks://`）`http://` `https://`，允许空行与注释行 |
+| 分享链接列表 | 每行一条，`ss://` `ssr://` `vmess://` `vless://` `trojan://` `hysteria://` `hysteria2://`（含 `hy2://`）`tuic://` `snell://` `wireguard://`（含 `wg://`、`wireguard-json://`）`socks5://`（含 `socks://`）`http://` `https://`，允许空行与注释行 |
 | 整体 Base64 | 上面列表的 Base64（标准或 URL-safe、缺 padding、含空白都能解；**最多自动解两层包裹**，部分机场会二次编码；自动跳过 UTF-8 BOM） |
+| WireGuard 配置 | 标准 wg-quick 的 `.conf`（`[Interface]` / `[Peer]`），可直接作为文件/URL 输入，**整体 Base64 包裹的也认** —— 见「[WireGuard](#wireguard能转成什么不能转成什么)」 |
 | Clash YAML | 上游 Clash / mihomo 配置，取其 `proxies:` 列表（需要 yaml-cpp，见「[从源码构建](#从源码构建)」）；含 `network: xhttp` + `xhttp-opts`（含 `download-settings`）的节点会完整还原。**JSON 版的 Clash 配置也走这条路**：JSON 是 YAML 的子集，mihomo 直接吃，很多面板的 `?app=clash` 返回的就是 JSON（`content-type: application/json`） |
 | Xray JSON 配置 | Xray / V2Ray 的**完整客户端配置**：单份配置对象，或「每份配置只装一个节点」的**配置数组**（面板 `?app=xray` 返回的就是后者，节点名放在根级 Xray 并不认识的 `remarks` 里）。只取出站里能当节点用的协议（vless / vmess / trojan / shadowsocks / socks / http），还原 `settings.vnext`/`servers`、`streamSettings`（ws / grpc / h2 / http / xhttp / tcp+http-header）、`security`（tls / reality / none）、`tlsSettings`（sni / alpn / 指纹 / 证书钉扎 / allowInsecure）、`realitySettings`、`sockopt.tcpFastOpen`、xhttp 的 `downloadSettings`；`freedom` / `blackhole` / `dns` 等内置出站与 `inbounds` / `routing` / `policy` 不是节点，忽略 |
 | JSON 配置 | sing-box 的 JSON 配置 ❌ 暂不支持（它的出站用 `type` 而不是 `protocol`），识别出来会**明确报错**「这是 sing-box 的 JSON 配置」，而不是抛一堆语法错（Clash 方言与 Xray 的 JSON 见上面两行） |
@@ -156,10 +168,13 @@
 | tuic | ✅ | ❌ 不支持 | ✅ | ❌ 未启用 |
 | snell | ✅ | ❌ 不支持 | ❌ 不支持 | ❌ 不支持 |
 | socks5 / http | ✅ | ✅ | ✅ | ✅ socks5 / ⚠️ http 需用 `-t v2rayn` |
-| wireguard | ⏳ 未实现 | ⏳ | ⏳ | ⏳ |
+| wireguard | ✅ 含 `peers` 多对端 | ✅ | ✅ **endpoint 新形态** | ✅ `wireguard://` |
 
 > 「v2rayNG」这一列指 `links` / `base64` 目标产出的分享链接能否被 v2rayNG 导入；
 > v2rayNG 是 Xray/v2fly 客户端，**不支持 ssr、snell、hysteria v1、tuic**，也不认识 `http://` 分享链接。
+> WireGuard 是例外中的例外：它既不是流代理、也不是 Xray 出站语义，但 v2rayNG **实现了
+> `wireguard://` 的导入**（`fmt/WireguardFmt.kt`），所以这一格是 ✅。
+> 能转成什么、为什么不能转成 vmess/vless，见「[WireGuard：能转成什么](#wireguard能转成什么不能转成什么)」。
 
 ### 传输层（`network`）× 目标
 
@@ -294,6 +309,69 @@ vision: not a valid supported TLS connection
 subconv 对这种「带 vision、但既不是 tcp+TLS 也没开 encryption」的节点也会告警 —— 它正是识别
 「中间层丢字段」最直接的信号。
 
+### WireGuard：能转成什么、不能转成什么
+
+WireGuard 与上面所有协议在数据模型上都不是一类东西，这一点决定了它能转到哪里：
+
+| | WireGuard | vmess / vless / trojan / ss / hysteria2 / tuic / socks / http |
+|---|---|---|
+| 层次 | **三层（IP）隧道，跑在 UDP 上** | 四层 / 七层**流代理**（TCP 或 QUIC） |
+| 数据面 | 加密封装**原始 IP 包**，定长头 + Curve25519 密钥 | 先发**目标地址:端口**，再由服务端代连 |
+| 认证 | 每个 peer 一对公私钥（+ 可选 PSK） | uuid / password / method + 传输层 |
+| 服务端角色 | **路由器**：给客户端分地址、转发 IP 包 | **代理**：按客户端指定的目标建连 |
+
+因此 **WireGuard 不能转成 vmess / vless / trojan / hysteria2 / tuic / ss / ssr / socks5 / http**，
+也不能反过来转 —— 这不是「还没实现」，而是**架构上不成立**：WireGuard 的报文里根本没有
+"我要访问哪个域名:端口" 这个概念，两边没有可映射的字段。所谓"WG 转 vmess"实际只能是
+**串联**（本地起一个流代理，再用 WireGuard 出网），那需要额外一台跑 WG 客户端的服务器，
+不是格式转换。
+
+真正有意义的转换方向是 **WireGuard ⇄ WireGuard 配置**，也就是把同一个 WG 节点写成不同内核
+认得的形式，以及和它同族的 **AmneziaWG / WARP**：
+
+| 目标 | 支持 | subconv 产物 |
+|---|---|---|
+| **mihomo / Clash** | ✅ 实测 | `type: wireguard` + `peers:`（含 `ip`/`ipv6`/`allowed-ips`/`reserved`/`mtu`/`dns`/`remote-dns-resolve`/`ip-stack`） |
+| **Xray-core** | ✅ 实测 | `protocol: wireguard`，`settings.secretKey` / `address[]` / `peers[]{endpoint,publicKey,preSharedKey,keepAlive,allowedIPs}` + `reserved`/`mtu`/`remoteDNS` |
+| **sing-box** | ✅ 实测 | **`endpoints[]`**（1.11 起的新形态）`type: wireguard` + `address`/`private_key`/`peers[]`。旧版 `outbounds[].type: wireguard`（扁平形态）**1.11 弃用、1.13 移除**，故只产出新形态 |
+| **v2rayN / v2rayNG** | ✅ | `wireguard://`（两端都实现了它，见下）；另有 `-t v2rayn` 的 `v2rayn://wireguard/<base64url(JSON)>` |
+| **AmneziaWG** | ⚠️ 仅 mihomo | mihomo 有 `amnezia-wg-option`（`jc`/`jmin`/`jmax`/`s1..s4`/`h1..h4`/`i1..i5` 等抗 DPI 参数）；Xray / sing-box 官方均无 |
+| **WARP（Cloudflare）** | ✅ | WARP 就是普通 WireGuard 端点，唯一的特殊性是 `reserved` 这 3 个字节 |
+| IPsec / IKEv2、OpenVPN、Tailscale、ZeroTier | ❌ | 各自独立的密钥与控制平面模型，无法互转 |
+
+#### WireGuard 的输入形态
+
+| 形态 | 说明 |
+|---|---|
+| `wireguard://` 分享链接 | `wireguard://<私钥>@<host>:<port>?publickey=…&address=…&reserved=…`。**这不是 RFC，而是 v2rayN / v2rayNG 的事实约定**（v2rayN 的 `Global.ProtocolShares`、v2rayNG 的 `fmt/WireguardFmt.kt` 都实现了 `parse` / `toUri`），subconv 按它的字段名原样解析与产出 |
+| `wg://` | 同上（别名） |
+| `wireguard-json://<base64>` | 内嵌 JSON；裸 base64 / 裸 JSON / `wireguard-json://` 前缀都收，字段名兼容 camelCase 与 v2rayN 的 `WgPublicKey`/`WgInterfaceAddress` 等 |
+| 标准 `.conf` | wg-quick 的客户端配置：`[Interface]`（`PrivateKey`/`Address`/`DNS`/`MTU`）+ `[Peer]`（`PublicKey`/`PresharedKey`/`AllowedIPs`/`Endpoint`/`PersistentKeepalive`）。作为文件输入时按内容嗅探，**整体 Base64 包裹的 `.conf` 也认** |
+| Clash YAML 的 `type: wireguard` | 简化语法（顶层 `server`/`port`/`public-key`/…）与完整语法（`peers:` 数组）都收 |
+| Xray JSON 的 `protocol: wireguard` 出站 | `settings` 里的 `secretKey`/`address`/`peers` 还原成节点 |
+
+> **`reserved` 是什么**：WireGuard 握手报文第 2–4 字节是 3 个"保留位"（协议规定填 0）。
+> Cloudflare 的 WARP 把账号标识（`client_id` 的前 3 字节）塞进这 3 个字节，服务端据此识别账号 ——
+> **漏掉它会出现最迷惑的故障：握手成功、但一个字节的数据都不通**。三种写法 subconv 都收：
+> 十进制数组 `[209,98,59]`、4 字符 base64 `"U4An"`、6 位 hex `"d1623b"`；
+> 输出时按目标写（mihomo/Xray/sing-box 用数组，分享链接用 v2rayN 的 `209,98,59` 字符串）。
+
+#### 一个容易踩的坑：分享链接缺 `=`，mihomo 直接拒绝加载
+
+base64 密钥尾部有 `=` 补齐（44 字符）。分享链接里带 `=` 会让 URI 解析出岔子，所以链接形态
+一律省略它（43 字符）—— v2rayN / v2rayNG 就是这么导出的，subconv 也按这个形态解析。
+
+但 **mihomo 用的是 Go 的 `base64.StdEncoding.DecodeString`，遇到缺 padding 的密钥会直接报错**：
+
+```
+level=error msg="proxy 0: decode private key: illegal base64 data at input byte 40"
+configuration file ... test failed
+```
+
+所以 subconv 在**写进任何内核配置文件时都会把 `=` 补回来**（`clash` / `xray` / `singbox` 目标），
+只有分享链接保持无 padding 的形态。Xray 两种都接受（它的 `ParseWireGuardKey` 自己会 Trim 掉 `=`），
+但统一补齐后，同一份配置在三个内核里都能加载。
+
 ## 快速开始
 
 Windows（PowerShell）：
@@ -302,7 +380,7 @@ Windows（PowerShell）：
 # 1. 构建（Release + 单元测试）
 .\build.ps1 -Test
 
-# 2. 生成测试夹具（可选，覆盖 19 节点 / 11 种协议 + xhttp 传输）
+# 2. 生成测试夹具（可选，覆盖 20 节点 / 12 种协议 + xhttp 传输）
 .\tests\fixtures\generate.ps1
 
 # 3. 转换：本地文件 / URL / Clash YAML 都可以作为输入
@@ -1105,7 +1183,7 @@ JSON 版 Clash 配置与 Xray JSON 配置的嗅探/解析/端到端输出、去�
 .\build\subconv_tests.exe                          # 只跑测试（需已构建）
 node tools\check-web-input.mjs                     # 校验 Web UI 输入框切分（CI 也会跑）
 
-.\tests\fixtures\generate.ps1                      # 生成夹具：19 节点 / 11 种协议 + xhttp
+.\tests\fixtures\generate.ps1                      # 生成夹具：20 节点 / 12 种协议 + xhttp
 .\tools\validate.ps1 -Setup                        # 下载三个内核到 tools\bin\（不入库）
 .\tools\validate.ps1 -Source tests\fixtures\all_protocols_b64.txt -Target clash|xray|singbox
 .\tools\validate.ps1 -Source sub.yaml -Target xray -ProbeCert   # 带证书指纹（联网）
@@ -1363,8 +1441,9 @@ subconv-v1.0-linux-x86_64/
 - `GEOIP` 规则需要 `geoip.metadb`；mihomo 首次加载会自动下载，离线环境请手动放置。
 - **`v2rayn` 是单向输出**：项目里没有 `v2rayn://` 的**输入**解析器，所以它无法参与往返测试，
   只能靠 `tools/verify-v2rayn.ps1` 重放两端逻辑验证。
-- **WG / sing-box JSON 配置输入未实现**：`wireguard://`、`wg://` 会被识别但跳过；sing-box 的
-  JSON 配置（`outbounds[].type`）当输入会得到明确报错。
+- **WG / sing-box JSON 配置输入**：`wireguard://`、`wg://`、`wireguard-json://` 与标准 `.conf`
+  都已支持（见「[WireGuard](#wireguard能转成什么不能转成什么)」）；sing-box 的 JSON 配置
+  （`outbounds[].type`）当输入会得到明确报错。
   * **Clash 方言的 JSON**（面板 `?app=clash` 返回的那种）已经支持 —— 它按 Clash YAML 解析，
     因为 JSON 就是 YAML 的子集；
   * **Xray 的 JSON 客户端配置**（`outbounds[].protocol`，含面板 `?app=xray` 那种配置数组）已经支持，
@@ -1373,6 +1452,11 @@ subconv-v1.0-linux-x86_64/
     * 未知传输层（如 `httpupgrade`）与 `dialerProxy`（链式代理）会**跳过节点并告警** ——
       与其产出一条连不上的线，不如说清楚；
     * kcp 的 `header` / `seed` 没有建模，遇到会告警但保留节点（服务端非默认配置时可能连不上）。
+- **WireGuard 只对第一个 peer 生成分享链接**：分享链接格式只承载一个对端。多 peer 节点在
+  `clash` / `xray` 目标里会完整保留 `peers`，但 `links` / `base64` / `v2rayn` 只写第一个对端。
+- **WireGuard 的 `allowed-ips` 在分享链接里由客户端推导**：v2rayN / v2rayNG 不读 `allowedips` 参数，
+  它们按「address 里有没有 IPv6」决定 `0.0.0.0/0`（+`::/0`）。subconv 只在自定义的 allowed-ips
+  与这个推导结果不同时才写出该参数，对方的推导结果与之一致时不影响连通性。
 
 ## 构建环境
 

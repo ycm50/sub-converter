@@ -15,5 +15,6 @@ hysteria://hy.example.com:443?auth=hypw&peer=hy.example.com&insecure=1&upmbps=10
 hysteria2://hy2pw@hy2.example.com:443?sni=hy2.example.com&insecure=1&obfs=salamander&obfs-password=obfspw&up=100&down=200#HYSTERIA2
 tuic://b831381d-6324-4d53-ad4f-8cda48b30811:tuicpw@tuic.example.com:443?congestion_control=bbr&alpn=h3&sni=tuic.example.com&udp_relay_mode=native&allow_insecure=1#TUIC
 snell://snellpsk@snell.example.com:443?version=4&obfs=http&obfs-host=www.bing.com#SNELL
+wireguard://eCtXsJZ27%2B4PbhDkHnB923tkUn2Gj59wZw5wFA75MnU%3D@162.159.192.1:2408?publickey=Cr8hWlKvtDt7nrvf%2Bf0brNQQzabAqrjfBvas9pmowjo%3D&address=172.16.0.2%2F32%2Cfd01%3A5ca1%3Aab1e%3A80fa%3Aab85%3A6eea%3A213f%3Af4a5%2F128&reserved=209%2C98%2C59&mtu=1280&dns=1.1.1.1%2C8.8.8.8#WIREGUARD
 socks5://user:pa%40ss@127.0.0.1:1080#Local-SOCKS
 https://1.2.3.4:443#TLS-HTTP-Proxy

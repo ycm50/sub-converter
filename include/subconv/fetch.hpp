@@ -57,11 +57,12 @@ Result<HttpResponse> http_get_with_retry(const std::string& url, const HttpOptio
 // 内容嗅探
 // ---------------------------------------------------------------------------
 enum class ContentKind {
-  ShareLinks,   ///< 分享链接列表（可能被 Base64 包裹）
-  ClashYaml,    ///< Clash / mihomo 配置（含 JSON 方言）
-  XrayJson,     ///< Xray / V2Ray 的 JSON 客户端配置（含「每份一个节点」的数组形态）
-  JsonConfig,   ///< 其它 JSON 配置（sing-box / v2ray），暂不支持
-  Html,         ///< 网页（通常是机场错误页）
+  ShareLinks,    ///< 分享链接列表（可能被 Base64 包裹）
+  ClashYaml,     ///< Clash / mihomo 配置（含 JSON 方言）
+  XrayJson,      ///< Xray / V2Ray 的 JSON 客户端配置（含「每份一个节点」的数组形态）
+  JsonConfig,    ///< 其它 JSON 配置（sing-box / v2ray），暂不支持
+  WireGuardConf, ///< 标准 WireGuard 客户端配置（`[Interface]` / `[Peer]`）
+  Html,          ///< 网页（通常是机场错误页）
   Unknown,
 };
 

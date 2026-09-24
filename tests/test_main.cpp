@@ -13,6 +13,7 @@
 #include "subconv/json.hpp"
 #include "subconv/server.hpp"
 #include "subconv/vless_encryption.hpp"
+#include "subconv/wireguard.hpp"
 #include "subconv/yaml.hpp"
 
 namespace {
@@ -642,6 +643,9 @@ void test_dns_and_name() {
 void test_advanced_protocols() {
   section("高级协议解析");
   const std::string uuid = "b831381d-6324-4d53-ad4f-8cda48b30811";
+  // WireGuard 的 32 字节密钥（base64：44 字符含 '='，解析后统一去掉尾部 '=' → 43 字符）
+  const std::string wg_priv = "eCtXsJZ27+4PbhDkHnB923tkUn2Gj59wZw5wFA75MnU";
+  const std::string wg_pub = "Cr8hWlKvtDt7nrvf+f0brNQQzabAqrjfBvas9pmowjo";
 
   // --- SSR ---
   const std::string ssr_inner =
@@ -803,7 +807,97 @@ void test_advanced_protocols() {
   CHECK(!subconv::parse_node("vless://@h:443").has_value());
   CHECK(!subconv::parse_node("trojan://h:443").has_value());
   CHECK(!subconv::parse_node("vmess://" + base64_encode("not json")).has_value());
+  // --- WireGuard ---
+  // 关键字段缺失时必须失败（否则会产出连不上的节点）
   CHECK(!subconv::parse_node("wireguard://x@h:1").has_value());
+  CHECK(!subconv::parse_node("wireguard://" + wg_priv + "@h:1").has_value());  // 缺公钥
+  {
+    auto wgw = subconv::parse_node("wireguard://" + wg_priv + "@wg.example.com:2480?publickey=" +
+                                   wg_pub + "&address=172.16.0.2/32#W");
+    CHECK(wgw.has_value());
+    if (wgw) {
+      CHECK(wgw->protocol == subconv::Protocol::WireGuard);
+      CHECK_EQ(wgw->server, std::string("wg.example.com"));
+      CHECK_EQ(wgw->port, 2480);
+      CHECK_EQ(wgw->wireguard.private_key, wg_priv);
+      CHECK_EQ(wgw->wireguard.ip, std::string("172.16.0.2/32"));
+      CHECK_EQ(wgw->wireguard.peers.size(), static_cast<std::size_t>(1));
+      CHECK_EQ(wgw->wireguard.peers.front().public_key, wg_pub);
+      CHECK_EQ(wgw->name, std::string("W"));
+    }
+  }
+  // v2rayN / v2rayNG 的形态：address 同栏装 v4+v6，reserved 是逗号分隔十进制
+  {
+    auto wgw = subconv::parse_node("wireguard://" + wg_priv +
+                                   "@162.159.192.1:2408?publickey=" + wg_pub +
+                                   "&address=172.16.0.2/32,fd01::1/128&reserved=209,98,59"
+                                   "&mtu=1280&dns=1.1.1.1#WARP");
+    CHECK(wgw.has_value());
+    if (wgw) {
+      CHECK_EQ(wgw->wireguard.ip, std::string("172.16.0.2/32"));
+      CHECK_EQ(wgw->wireguard.ipv6, std::string("fd01::1/128"));
+      CHECK_EQ(wgw->wireguard.peers.front().reserved.size(), static_cast<std::size_t>(3));
+      if (wgw->wireguard.peers.front().reserved.size() == 3) {
+        CHECK_EQ(wgw->wireguard.peers.front().reserved[0], 209);
+        CHECK_EQ(wgw->wireguard.peers.front().reserved[1], 98);
+        CHECK_EQ(wgw->wireguard.peers.front().reserved[2], 59);
+      }
+      CHECK_EQ(wgw->wireguard.mtu, 1280);
+      CHECK_EQ(wgw->wireguard.dns.size(), static_cast<std::size_t>(1));
+    }
+  }
+  // mihomo 的字符串形态 reserved（4 字符 base64）
+  {
+    auto wgw = subconv::parse_node("wireguard://" + wg_priv + "@h:1?publickey=" + wg_pub +
+                                   "&reserved=U4An&address=10.0.0.2");
+    CHECK(wgw.has_value());
+    if (wgw) {
+      CHECK_EQ(wgw->wireguard.peers.front().reserved.size(), static_cast<std::size_t>(3));
+      if (wgw->wireguard.peers.front().reserved.size() == 3) {
+        CHECK_EQ(wgw->wireguard.peers.front().reserved[0], 0x53);
+        CHECK_EQ(wgw->wireguard.peers.front().reserved[1], 0x80);
+        CHECK_EQ(wgw->wireguard.peers.front().reserved[2], 0x27);
+      }
+    }
+  }
+  // 标准 .conf 文本
+  {
+    const std::string conf =
+        "[Interface]\nPrivateKey = " + wg_priv +
+        "\nAddress = 172.16.0.2/32, fd01::2/128\nDNS = 1.1.1.1\nMTU = 1280\n\n"
+        "[Peer]\nPublicKey = " + wg_pub +
+        "\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = 162.159.192.1:2408\n"
+        "PersistentKeepalive = 25\n";
+    auto wgc = subconv::parse_wireguard_conf(conf, "Conf");
+    CHECK(wgc.has_value());
+    if (wgc) {
+      CHECK_EQ(wgc->server, std::string("162.159.192.1"));
+      CHECK_EQ(wgc->port, 2408);
+      CHECK_EQ(wgc->wireguard.ipv6, std::string("fd01::2/128"));
+      CHECK_EQ(wgc->wireguard.mtu, 1280);
+      CHECK_EQ(wgc->wireguard.peers.front().keepalive, 25);
+      CHECK_EQ(wgc->wireguard.peers.front().allowed_ips.size(), static_cast<std::size_t>(2));
+    }
+  }
+  // 内嵌 JSON（v2rayN 的 PascalCase 别名）
+  {
+    subconv::Json wj = subconv::Json::object();
+    wj["privateKey"] = wg_priv;
+    wj["publicKey"] = wg_pub;
+    wj["address"] = "172.16.0.2/32,fd01::2/128";
+    wj["server"] = "wg.example.com";
+    wj["port"] = 2408;
+    wj["reserved"] = "209,98,59";
+    wj["mtu"] = 1280;
+    auto wgj = subconv::parse_wireguard_json(wj.dump(), "Json");
+    CHECK(wgj.has_value());
+    if (wgj) {
+      CHECK_EQ(wgj->server, std::string("wg.example.com"));
+      CHECK_EQ(wgj->wireguard.ipv6, std::string("fd01::2/128"));
+      CHECK_EQ(wgj->wireguard.mtu, 1280);
+    }
+  }
+
   CHECK(!subconv::parse_node("hy2://pw@h:443").has_value() == false);  // hy2 合法
 }
 

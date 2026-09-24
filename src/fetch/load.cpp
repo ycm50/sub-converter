@@ -9,6 +9,7 @@
 #include "subconv/fetch.hpp"
 #include "subconv/fsutil.hpp"
 #include "subconv/json.hpp"
+#include "subconv/wireguard.hpp"
 
 namespace subconv::fetch {
 namespace {
@@ -28,8 +29,16 @@ std::string_view ltrim_view(std::string_view s) {
   return s.substr(i);
 }
 
-long long now_seconds() {
-  return std::chrono::duration_cast<std::chrono::seconds>(
+/// 第一段（忽略 BOM 与空行）是不是 `[Interface]`。
+/// 用它把「WireGuard 的 .conf」与「JSON 数组 / 分享链接列表」区分开 ——
+/// `[Interface]` 整串恰好也是合法 base64 字母表，只靠 looks_like_base64 会误判。
+bool looks_like_wireguard_conf(std::string_view text) {
+  const std::string_view s = ltrim_view(strip_bom(text));
+  const std::string head = codec::to_lower(codec::trim(s.substr(0, 64)));
+  return head.rfind("[interface]", 0) == 0;
+}
+
+long long now_seconds() {  return std::chrono::duration_cast<std::chrono::seconds>(
              std::chrono::system_clock::now().time_since_epoch())
       .count();
 }
@@ -92,6 +101,12 @@ ContentKind sniff_content(std::string_view body, std::string_view content_type) 
   // （BPB 面板 `?app=clash` 返回的就是这种，content-type 还是 application/json）。
   const std::string head = codec::to_lower(s.substr(0, std::min<std::size_t>(s.size(), 262144)));
 
+  // WireGuard 的 wg-quick 配置（`[Interface]` / `[Peer]`）必须排在最前面：
+  // 它以 '[' 开头，会被下面的 JSON 分支吃掉（JSON 数组也是 '[' 打头）。
+  if (head.find("[interface]") != std::string::npos && head.find("[peer]") != std::string::npos) {
+    return ContentKind::WireGuardConf;
+  }
+
   if (first == '{' || first == '[') {
     // JSON 是 YAML 的子集，mihomo 直接吃 JSON 版 Clash 配置。
     // 只见 Clash 专有键就交给 Clash 解析器；Xray 客户端配置（含 BPB `?app=xray`
@@ -115,10 +130,25 @@ ContentKind sniff_content(std::string_view body, std::string_view content_type) 
       head.find("proxy_group") != std::string::npos) {
     return ContentKind::ClashYaml;
   }
+  // WireGuard 的 wg-quick 配置：`[Interface]` 打头（注释或 BOM 之后）。
+  // 必须在 `://` 检查之前 —— 配置里的 `Endpoint = host:port` 不含 `://`，
+  // 但注释或 DNS 行可能带上，别被误判成分享链接。
+  if (head.find("[interface]") != std::string::npos && head.find("[peer]") != std::string::npos) {
+    return ContentKind::WireGuardConf;
+  }
   if (head.find("://") != std::string::npos) return ContentKind::ShareLinks;
 
-  // 纯 Base64 列表（整体可能没有 scheme）
-  if (codec::looks_like_base64(codec::trim(s))) return ContentKind::ShareLinks;
+  // 整体 Base64 包裹的分享链接列表：有些机场（以及不少 WARP 教程）会把内容整段编码后下发。
+  const std::string trimmed = codec::trim(s);
+  if (codec::looks_like_base64(trimmed)) {
+    // 解一层看看是不是 WireGuard 的 .conf：`[Interface]` 整串恰好也落在 base64 字母表里，
+    // 不解开就会当成分享链接、最后只报一堆"无法识别的内容"。
+    // 只看第一段是不是 [Interface]，避免把真正的节点列表误判成配置。
+    if (auto decoded = codec::base64_decode(trimmed)) {
+      if (looks_like_wireguard_conf(*decoded)) return ContentKind::WireGuardConf;
+    }
+    return ContentKind::ShareLinks;
+  }
 
   // content-type 兜底
   const std::string ct = codec::to_lower(content_type);
@@ -261,6 +291,16 @@ Result<Subscription> parse_content(std::string_view body, std::string source,
       return fail("来源是 JSON 配置而不是订阅（" + source +
                   "）：这份内容里没有 Xray 的代理出站（outbounds[].protocol）；"
                   "sing-box 的 JSON 配置（outbounds[].type）暂不支持。");
+    case ContentKind::WireGuardConf: {
+      // 标准的 wg-quick 客户端配置：交给同一个解析器（这里的报错已经足够具体，
+      // 不再退回去当分享链接解析 —— 那样只会得到一堆"无法识别的内容"）。
+      auto node = parse_wireguard_conf(body, "WireGuard");
+      if (!node) return fail("WireGuard 配置解析失败（" + source + "）: " + node.error().message);
+      Subscription sub;
+      sub.source = std::move(source);
+      sub.nodes.push_back(std::move(*node));
+      return sub;
+    }
     case ContentKind::ShareLinks:
     case ContentKind::Unknown:
       break;

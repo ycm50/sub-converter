@@ -1,4 +1,4 @@
-﻿# 生成 tests/fixtures 下的测试订阅夹具（可重复运行，结果应稳定）
+# 生成 tests/fixtures 下的测试订阅夹具（可重复运行，结果应稳定）
 #
 # 注意：PowerShell 中 `,` 的优先级高于 `+`，所以 @() 里每个元素必须加括号，
 # 否则 'a' + 'b', 'c' + 'd' 会被拼成单个字符串。
@@ -59,6 +59,12 @@ $uris = @(
 
   # Snell
   ('snell://snellpsk@snell.example.com:443?version=4&obfs=http&obfs-host=www.bing.com#SNELL'),
+
+  # WireGuard（v2rayN / v2rayNG 的 wireguard:// 形态；密钥是 32 字节的 base64）
+  ('wireguard://' + [Uri]::EscapeDataString('eCtXsJZ27+4PbhDkHnB923tkUn2Gj59wZw5wFA75MnU=') +
+   '@162.159.192.1:2408?publickey=' + [Uri]::EscapeDataString('Cr8hWlKvtDt7nrvf+f0brNQQzabAqrjfBvas9pmowjo=') +
+   '&address=172.16.0.2%2F32%2Cfd01%3A5ca1%3Aab1e%3A80fa%3Aab85%3A6eea%3A213f%3Af4a5%2F128' +
+   '&reserved=209%2C98%2C59&mtu=1280&dns=1.1.1.1%2C8.8.8.8#WIREGUARD'),
 
   # 通用
   ('socks5://user:pa%40ss@127.0.0.1:1080#Local-SOCKS'),
