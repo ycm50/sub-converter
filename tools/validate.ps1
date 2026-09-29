@@ -5,6 +5,10 @@
 #   .\tools\validate.ps1 -Source tests\fixtures\all_protocols_b64.txt -Target xray
 #   .\tools\validate.ps1 -Source tests\fixtures\all_protocols_b64.txt -Target singbox
 #   .\tools\validate.ps1 -Source sub.yaml -Target xray -ProbeCert  # 顺带探测证书指纹
+#   .\tools\validate.ps1 -Source sub.yaml -Target xray -Chain "socks5://10.0.0.1:1080","@中转"
+#                                                                  # 带链式代理（前置 / 中转）
+#   .\tools\validate.ps1 -Source sub.yaml -Target xray -ChainRear "trojan://pw@exit.example.com:443"
+#                                                                  # 带链式代理（后置 / 出口）
 #
 # 注意：参数名不能用 -Input —— $Input 是 PowerShell 自动变量，会把同名参数覆盖掉。
 #
@@ -21,8 +25,36 @@ param(
   [switch]$Setup,
   # 转换时加 --probe-cert：主动连节点取证书 SHA256，写进 xray 的 pinnedPeerCertSha256。
   # 不加的话，「证书与 SNI 对不上」的机场节点在 Xray 下必然握手失败（客户端全是 -1）。
-  [switch]$ProbeCert
+  [switch]$ProbeCert,
+  # 链式代理（前置 / 中转）：按「最外侧 -> 最内侧」的顺序，值同 subconv 的 --chain。
+  # PowerShell 不允许同一个参数写两遍，多跳请用逗号数组或 `|` 分隔：
+  #   .\tools\validate.ps1 -Source sub.yaml -Target xray -Chain "socks5://10.0.0.1:1080"
+  #   .\tools\validate.ps1 -Source sub.yaml -Target xray -Chain "socks5://10.0.0.1:1080","@中转"
+  #   .\tools\validate.ps1 -Source sub.yaml -Target xray -Chain "socks5://10.0.0.1:1080|@中转"
+  [string[]]$Chain = @(),
+  # 后置代理（出口）：按「最内侧 -> 最外侧」的顺序，值同 subconv 的 --chain-rear。
+  # 产物变成「本地 -> … -> 每个节点 -> 后置 -> 目标」，流量落点挪到后置链路的末端
+  # （末端出站名写成「节点 -> 后置」）。写法与 -Chain 相同（逗号数组或 `|` 分隔）。
+  #   .\tools\validate.ps1 -Source sub.yaml -Target xray -ChainRear "trojan://pw@exit.example.com:443#出口"
+  [string[]]$ChainRear = @()
 )
+
+# `|` 分隔与数组写法等价（`|` 不会出现在合法 URL / 节点名里）
+$chainHops = @()
+foreach ($item in $Chain) {
+  foreach ($piece in ($item -split '\|')) {
+    $hop = $piece.Trim()
+    if ($hop) { $chainHops += $hop }
+  }
+}
+
+$chainRearHops = @()
+foreach ($item in $ChainRear) {
+  foreach ($piece in ($item -split '\|')) {
+    $hop = $piece.Trim()
+    if ($hop) { $chainRearHops += $hop }
+  }
+}
 
 $ErrorActionPreference = "Stop"
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }
@@ -184,6 +216,8 @@ $config = Join-Path $work "config.$ext"
 Write-Host "== 转换 ($Target) ==" -ForegroundColor Cyan
 $convertArgs = @("-i", $Source, "-t", $Target, "-o", $config, "-v")
 if ($ProbeCert) { $convertArgs += "--probe-cert" }
+foreach ($hop in $chainHops) { $convertArgs += @("--chain", $hop) }
+foreach ($hop in $chainRearHops) { $convertArgs += @("--chain-rear", $hop) }
 $code = Invoke-Native $subconv $convertArgs
 if ($code -ne 0) { throw "转换失败" }
 

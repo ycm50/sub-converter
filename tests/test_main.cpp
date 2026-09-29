@@ -1707,6 +1707,34 @@ void test_server() {
     if (req) CHECK(req->emit.rule_sets.empty());
   }
 
+  // ---- 链式代理：?chain= 可重复、也支持 | 分隔，顺序即链路顺序 ----
+  {
+    auto req = subconv::server::request_from_query(
+        "url=a.example/sub&chain=socks5%3A%2F%2F10.0.0.1%3A1080%23%E5%85%A5%E5%8F%A3"
+        "&chain=%40%E9%A6%99%E6%B8%AF%E4%B8%AD%E8%BD%AC",
+        defaults);
+    CHECK(req.has_value());
+    if (req) {
+      CHECK_EQ(req->emit.chain.size(), static_cast<std::size_t>(2));
+      CHECK_EQ(req->emit.chain[0], std::string("socks5://10.0.0.1:1080#入口"));
+      CHECK_EQ(req->emit.chain[1], std::string("@香港中转"));
+    }
+  }
+  {
+    auto req = subconv::server::request_from_query(
+        "url=a.example/sub&chain=" +
+            subconv::codec::percent_encode("socks5://10.0.0.1:1080#A|socks5://10.0.0.2:1080#B"),
+        defaults);
+    CHECK(req.has_value());
+    if (req) CHECK_EQ(req->emit.chain.size(), static_cast<std::size_t>(2));
+  }
+  {
+    // 不带 chain 参数时保持默认（空链路），别把「没给」当成「给了空」
+    auto req = subconv::server::request_from_query("url=a.example/sub", defaults);
+    CHECK(req.has_value());
+    if (req) CHECK(req->emit.chain.empty());
+  }
+
   // ---- POST /api/convert JSON 映射 ----
   {
     const std::string body = R"({
@@ -1761,6 +1789,31 @@ void test_server() {
         R"({"content":"x","options":{"rulesets":[]}})", defaults);
     CHECK(req.has_value());
     if (req) CHECK(req->emit.rule_sets.empty());
+  }
+
+  // 链式代理的 JSON 形态：数组 / 「| 分隔」字符串 / 换行分隔都要认
+  {
+    auto req = subconv::server::request_from_json(
+        R"({"content":"x","options":{"chain":["socks5://10.0.0.1:1080#A","@节点B"]}})", defaults);
+    CHECK(req.has_value());
+    if (req) {
+      CHECK_EQ(req->emit.chain.size(), static_cast<std::size_t>(2));
+      CHECK_EQ(req->emit.chain[0], std::string("socks5://10.0.0.1:1080#A"));
+      CHECK_EQ(req->emit.chain[1], std::string("@节点B"));
+    }
+  }
+  {
+    auto req = subconv::server::request_from_json(
+        R"({"content":"x","options":{"chain":"socks5://10.0.0.1:1080#A\n@节点B"}})", defaults);
+    CHECK(req.has_value());
+    if (req) CHECK_EQ(req->emit.chain.size(), static_cast<std::size_t>(2));
+  }
+  {
+    // 显式空数组 = 清空链路（与「没给这个键」区分开）
+    auto req = subconv::server::request_from_json(
+        R"({"content":"x","options":{"chain":[]}})", defaults);
+    CHECK(req.has_value());
+    if (req) CHECK(req->emit.chain.empty());
   }
 }
 
@@ -1819,6 +1872,651 @@ void test_console_encoding() {
 
 // ---------------------------------------------------------------------------
 // 分享链接输出（v2rayNG 等）：round-trip —— 生成的链接必须能被自己原样解析回来
+// ---------------------------------------------------------------------------
+void test_proxy_chain() {
+  section("链式代理（前置 / 中转）");
+  const std::string uuid = "b831381d-6324-4d53-ad4f-8cda48b30811";
+  const std::string fixture =
+      "ss://" + base64_encode("aes-256-gcm:pw") + "@ss.example.com:8388#SS\n" +
+      "vless://" + uuid + "@vl.example.com:443?encryption=none&security=tls&sni=vl.example.com#VL\n" +
+      "trojan://pw@tj.example.com:443?sni=tj.example.com#TJ\n" +
+      "hysteria2://pw@h2.example.com:443?sni=h2.example.com&insecure=1#H2\n";
+
+  auto sub = subconv::parse_subscription(fixture);
+  CHECK(sub.has_value());
+  if (!sub) return;
+  CHECK_EQ(sub->nodes.size(), std::size_t{4});
+
+  const std::string hop_link = "socks5://front:pass@10.0.0.1:1080#入口";
+
+  // --- xray：链路的落点是 streamSettings.sockopt.dialerProxy ---
+  {
+    subconv::EmitOptions opts;
+    opts.target = "xray";
+    opts.chain = {hop_link};
+    std::vector<std::string> warnings;
+    auto text = subconv::emit_config(sub->nodes, opts, &warnings);
+    CHECK(text.has_value());
+    if (text) {
+      const Json j = Json::parse(*text, nullptr, false);
+      CHECK(!j.is_discarded());
+      // 链路跳点排在最前，自身不挂 dialerProxy（它直连出去）
+      CHECK_EQ(j["outbounds"][0]["tag"], std::string("入口"));
+      CHECK_EQ(j["outbounds"][0]["protocol"], std::string("socks"));
+      CHECK_EQ(j["outbounds"][0]["settings"]["servers"][0]["address"], std::string("10.0.0.1"));
+      CHECK(!j["outbounds"][0]["streamSettings"].contains("sockopt"));
+
+      int chained = 0;
+      for (const auto& o : j["outbounds"]) {
+        const std::string tag = o["tag"].get<std::string>();
+        if (tag == "入口" || tag == "direct" || tag == "block") continue;
+        // ss / vless / trojan 全部接在入口后面
+        CHECK_EQ(o["streamSettings"]["sockopt"]["dialerProxy"], std::string("入口"));
+        ++chained;
+      }
+      // hysteria2 不是 Xray 出站，会被跳过 —— 剩下 3 个
+      CHECK_EQ(chained, 3);
+      // 链路跳点不进 balancer / observatory（它不是落地节点）
+      const Json& selector = j["routing"]["balancers"][0]["selector"];
+      for (const auto& tag : selector) CHECK(tag.get<std::string>() != "入口");
+      for (const auto& tag : j["observatory"]["subjectSelector"]) {
+        CHECK(tag.get<std::string>() != "入口");
+      }
+      // 末端走 UDP（hysteria2）时它经不了 TCP 隧道：Xray 目标会把它「跳过并说明原因」，
+      // 而不是让整份转换失败（它只是订阅里的候选节点）。
+      bool skipped_udp = false;
+      for (const auto& w : warnings) {
+        if (w.find("H2") != std::string::npos && w.find("UDP") != std::string::npos) skipped_udp = true;
+      }
+      CHECK(skipped_udp);
+    }
+  }
+
+  // --- 两跳：外部 socks + 订阅里的节点（引用型跳点同时仍是可选节点）---
+  {
+    subconv::EmitOptions opts;
+    opts.target = "xray";
+    opts.chain = {hop_link, "@SS"};
+    auto text = subconv::emit_config(sub->nodes, opts);
+    CHECK(text.has_value());
+    if (text) {
+      const Json j = Json::parse(*text, nullptr, false);
+      std::string hop1, hop2, ss, vl;
+      for (const auto& o : j["outbounds"]) {
+        const std::string tag = o["tag"].get<std::string>();
+        const std::string dialer =
+            o["streamSettings"].contains("sockopt")
+                ? o["streamSettings"]["sockopt"].value("dialerProxy", std::string())
+                : std::string();
+        if (tag == "入口") hop1 = dialer;
+        if (tag == "SS") hop2 = dialer;
+        if (tag == "SS") ss = dialer;
+        if (tag == "VL") vl = dialer;
+      }
+      CHECK_EQ(hop1, std::string());     // 最外侧直连
+      CHECK_EQ(hop2, std::string("入口"));  // 引用型跳点走自己那一跳，不成自环
+      CHECK_EQ(ss, std::string("入口"));
+      CHECK_EQ(vl, std::string("SS"));   // 其它节点接在链路末端
+      // 只有一个入口出站（引用型跳点不重复产出）
+      int hop_outbounds = 0;
+      for (const auto& o : j["outbounds"]) {
+        if (o["tag"].get<std::string>() == "入口") ++hop_outbounds;
+      }
+      CHECK_EQ(hop_outbounds, 1);
+    }
+  }
+
+  // --- 出错的情形：链路是显式指定的基础设施，必须报错而不是静默直连 ---
+  {
+    subconv::EmitOptions opts;
+    opts.target = "xray";
+    opts.chain = {"@SS", "@SS"};
+    auto text = subconv::emit_config(sub->nodes, opts);
+    CHECK(!text.has_value());
+    if (!text) CHECK(text.error().message.find("自环") != std::string::npos);
+
+    subconv::EmitOptions unknown;
+    unknown.target = "xray";
+    unknown.chain = {"@不存在的节点"};
+    auto bad = subconv::emit_config(sub->nodes, unknown);
+    CHECK(!bad.has_value());
+    if (!bad) CHECK(bad.error().message.find("节点名") != std::string::npos);
+
+    subconv::EmitOptions badlink;
+    badlink.target = "xray";
+    badlink.chain = {"socks5://10.0.0.1"};   // 缺端口
+    auto bad2 = subconv::emit_config(sub->nodes, badlink);
+    CHECK(!bad2.has_value());
+  }
+
+  // --- clash：代理级 dialer-proxy，链路跳点不进分组 ---
+  {
+    subconv::EmitOptions opts;
+    opts.target = "clash";
+    opts.emoji = false;
+    opts.chain = {hop_link};
+    std::vector<std::string> warnings;
+    auto text = subconv::emit_config(sub->nodes, opts, &warnings);
+    CHECK(text.has_value());
+    if (text) {
+      CHECK(text->find("dialer-proxy: 入口") != std::string::npos);
+      CHECK(text->find("# 链式代理: 本地 -> 入口 -> 每个节点") != std::string::npos);
+      // hysteria2 自身传输走 UDP，经不了 TCP 隧道：它是订阅里的候选节点，
+      // 应当被「跳过并说明原因」，而不是产出一条永远连不上的链。
+      bool skipped_h2 = false;
+      for (const auto& w : warnings) {
+        if (w.find("H2") != std::string::npos && w.find("UDP") != std::string::npos) skipped_h2 = true;
+      }
+      CHECK(skipped_h2);
+      // ss / vless / trojan 三条挂链路，hysteria2 那条不在
+      std::size_t chained_lines = 0;
+      for (std::size_t pos = text->find("dialer-proxy:");
+           pos != std::string::npos; pos = text->find("dialer-proxy:", pos + 1)) {
+        ++chained_lines;
+      }
+      CHECK_EQ(chained_lines, std::size_t{3});
+      // 分组里不能出现链路跳点（它不是落地节点）
+      const std::size_t groups = text->find("proxy-groups:");
+      CHECK(groups != std::string::npos);
+      if (groups != std::string::npos) {
+        CHECK(text->find("入口", groups) == std::string::npos ||
+              text->find("- 入口", groups) == std::string::npos);
+      }
+    }
+    // 原版 Clash 没有 dialer-proxy，只能忽略并告警
+    subconv::EmitOptions legacy = opts;
+    legacy.clash_legacy = true;
+    std::vector<std::string> legacy_warnings;
+    auto legacy_text = subconv::emit_config(sub->nodes, legacy, &legacy_warnings);
+    CHECK(legacy_text.has_value());
+    if (legacy_text) CHECK(legacy_text->find("dialer-proxy:") == std::string::npos);
+    bool warned = false;
+    for (const auto& w : legacy_warnings) {
+      if (w.find("dialer-proxy") != std::string::npos) warned = true;
+    }
+    CHECK(warned);
+    // 这条告警是在「成功产出」的分支里发的：如果只在失败分支收集告警就会把它丢掉，
+    // 那就等于链路被静默忽略 —— 正是这个功能最不能出的错，所以这里单独钉一颗钉子。
+    int legacy_hits = 0;
+    for (const auto& w : legacy_warnings) {
+      if (w.find("原版 Clash") != std::string::npos) ++legacy_hits;
+    }
+    CHECK(legacy_hits >= 1);
+  }
+
+  // --- sing-box：出站的 detour ---
+  {
+    subconv::EmitOptions opts;
+    opts.target = "singbox";
+    opts.emoji = false;
+    opts.chain = {hop_link};
+    auto text = subconv::emit_config(sub->nodes, opts);
+    CHECK(text.has_value());
+    if (text) {
+      const Json j = Json::parse(*text, nullptr, false);
+      CHECK(!j.is_discarded());
+      // outbounds[0]/[1] 是 selector / urltest，链路跳点排在节点前面
+      CHECK_EQ(j["outbounds"][0]["type"], std::string("selector"));
+      const Json& hop = j["outbounds"][2];
+      CHECK_EQ(hop["tag"], std::string("入口"));
+      CHECK(!hop.contains("detour"));
+      int chained = 0;
+      for (const auto& o : j["outbounds"]) {
+        const std::string type = o["type"].get<std::string>();
+        if (type == "selector" || type == "urltest") continue;
+        const std::string tag = o["tag"].get<std::string>();
+        if (tag == "入口" || tag == "direct" || tag == "block") continue;
+        if (o.contains("detour")) {
+          CHECK_EQ(o["detour"], std::string("入口"));
+          ++chained;
+        }
+      }
+      // hysteria2 自身传输是 UDP，经不了 TCP 隧道 → 被跳过；只剩 ss / vless / trojan 挂 detour
+      CHECK_EQ(chained, 3);
+      for (const auto& tag : j["outbounds"][1]["outbounds"]) {
+        CHECK(tag.get<std::string>() != "入口");
+      }
+    }
+  }
+
+  // --- 链路中间那一跳自己走 UDP：它也要经上一跳的 TCP 隧道到达 → 必须直接报错 ---
+  // 这是用户显式指定的基础设施，不能像订阅节点那样被「跳过」：丢掉一跳等于把链路拆掉。
+  {
+    subconv::EmitOptions opts;
+    opts.target = "clash";
+    opts.emoji = false;
+    // socks5 在前、hysteria2 在后 —— hysteria2 要经 TCP 隧道到达，链不通
+    opts.chain = {hop_link, "hysteria2://pw@h2.example.com:443?sni=h2.example.com#HOP2"};
+    auto text = subconv::emit_config(sub->nodes, opts);
+    CHECK(!text.has_value());
+    if (!text) {
+      CHECK(text.error().message.find("HOP2") != std::string::npos);
+      CHECK(text.error().message.find("UDP") != std::string::npos);
+      CHECK(text.error().message.find("chain[0]") != std::string::npos);   // 指出唯一合法位置
+    }
+    // 反序（UDP 那一跳在最外侧 chain[0]、直连出去）是合法的：它自己不需要隧道
+    subconv::EmitOptions outer;
+    outer.target = "clash";
+    outer.emoji = false;
+    outer.chain = {"hysteria2://pw@h2.example.com:443?sni=h2.example.com#HOP1", hop_link};
+    std::vector<std::string> outer_warnings;
+    auto outer_text = subconv::emit_config(sub->nodes, outer, &outer_warnings);
+    CHECK(outer_text.has_value());
+    // chain[0] 位置合法：不该把 HOP1 说成链位非法
+    for (const auto& w : outer_warnings) CHECK(w.find("HOP1") == std::string::npos);
+  }
+
+  // --- 协议覆盖：链位资质判定 / 目标能力提示 / 路径归一化 ---
+  {
+    // R3：UDP 传输协议只能放链路最外层
+    CHECK(subconv::protocol_is_udp_transport(subconv::Protocol::Hysteria));
+    CHECK(subconv::protocol_is_udp_transport(subconv::Protocol::Hysteria2));
+    CHECK(subconv::protocol_is_udp_transport(subconv::Protocol::Tuic));
+    CHECK(subconv::protocol_is_udp_transport(subconv::Protocol::WireGuard));
+    CHECK(!subconv::protocol_is_udp_transport(subconv::Protocol::Vless));
+    CHECK(!subconv::protocol_is_udp_transport(subconv::Protocol::Trojan));
+    CHECK(!subconv::protocol_is_udp_transport(subconv::Protocol::Snell));
+
+    // R4：目标内核表达不了这个跳点时，报错要指出「改用哪个目标」而不是只说一句不支持。
+    // hysteria2 在 Xray 没有对应出站，但 mihomo / sing-box 都有。
+    subconv::EmitOptions unsupported;
+    unsupported.target = "xray";
+    unsupported.chain = {"hysteria2://pw@h2.example.com:443?sni=h2.example.com#XHOP"};
+    auto bad = subconv::emit_config(sub->nodes, unsupported);
+    CHECK(!bad.has_value());
+    if (!bad) {
+      CHECK(bad.error().message.find("-t clash") != std::string::npos);
+      CHECK(bad.error().message.find("-t singbox") != std::string::npos);
+    }
+
+    // R6：ws 路径缺前导斜杠 → 三个目标产出一致补上（别把能不能连上交给对端实现的宽容度）
+    auto ws_node = subconv::parse_node(
+        "vless://" + uuid +
+        "@wsp.example.com:443?encryption=none&security=tls&sni=wsp.example.com"
+        "&type=ws&path=247672bf-ae38-4fb2-87f9-11dd45937128-vw#WSP");
+    CHECK(ws_node.has_value());
+    if (ws_node) {
+      for (const char* target : {"clash", "xray", "singbox", "links"}) {
+        subconv::EmitOptions o;
+        o.target = target;
+        o.emoji = false;
+        auto out = subconv::emit_config(subconv::NodeList{*ws_node}, o);
+        CHECK(out.has_value());
+        if (out) {
+          CHECK(out->find("/247672bf-ae38-4fb2-87f9-11dd45937128-vw") != std::string::npos ||
+                out->find("%2F247672bf-ae38-4fb2-87f9-11dd45937128-vw") != std::string::npos);
+        }
+      }
+    }
+  }
+
+  // --- 分享链接类目标没有链路字段：忽略但必须告警 ---
+  {
+    subconv::EmitOptions opts;
+    opts.target = "links";
+    opts.chain = {hop_link};
+    std::vector<std::string> warnings;
+    auto text = subconv::emit_config(sub->nodes, opts, &warnings);
+    CHECK(text.has_value());
+    bool warned = false;
+    for (const auto& w : warnings) {
+      if (w.find("没有链式代理字段") != std::string::npos) warned = true;
+    }
+    CHECK(warned);
+  }
+
+  // --- 输入保真：Xray 配置里的 dialerProxy 要能原样再输出 ---
+  {
+    const std::string config = R"({
+      "outbounds": [
+        { "protocol": "vless", "tag": "node-a",
+          "settings": { "vnext": [ { "address": "a.example.com", "port": 443,
+            "users": [ { "id": "b831381d-6324-4d53-ad4f-8cda48b30811", "encryption": "none" } ] } ] },
+          "streamSettings": { "network": "tcp", "security": "none",
+                              "sockopt": { "dialerProxy": "front" } } },
+        { "protocol": "socks", "tag": "front",
+          "settings": { "servers": [ { "address": "10.0.0.1", "port": 1080 } ] } },
+        { "protocol": "freedom", "tag": "direct" }
+      ],
+      "remarks": "链上的节点"
+    })";
+    auto parsed = subconv::parse_subscription(config);
+    CHECK(parsed.has_value());
+    if (parsed) {
+      CHECK_EQ(parsed->nodes.size(), std::size_t{2});
+      subconv::EmitOptions opts;
+      opts.target = "xray";
+      std::vector<std::string> warnings;
+      auto text = subconv::emit_config(parsed->nodes, opts, &warnings);
+      CHECK(text.has_value());
+      if (text) {
+        const Json j = Json::parse(*text, nullptr, false);
+        // 根级 remarks 是一个基础名：两个出站会被拆成「链上的节点」「链上的节点 2」
+        bool linked = false;
+        for (const auto& o : j["outbounds"]) {
+          if (o["tag"].get<std::string>() == "链上的节点") {
+            // 原 dialerProxy 指的是 tag=front 那条出站（被重命名成「链上的节点 2」）
+            CHECK_EQ(o["streamSettings"]["sockopt"]["dialerProxy"], std::string("链上的节点 2"));
+            linked = true;
+          }
+        }
+        CHECK(linked);
+        // 兜底的 freedom 出站不该被当成节点
+        CHECK(j["outbounds"].size() >= 3);
+      }
+      // 引用的出站不在本次输出里时要明确告警（而不是静默直连）
+      auto only_a = subconv::parse_node(
+          "vless://b831381d-6324-4d53-ad4f-8cda48b30811@a.example.com:443?encryption=none#A");
+      CHECK(only_a.has_value());
+      if (only_a) {
+        only_a->dialer_proxy = "front";
+        subconv::EmitOptions opts2;
+        opts2.target = "xray";
+        std::vector<std::string> warnings2;
+        auto text2 = subconv::emit_config(subconv::NodeList{*only_a}, opts2, &warnings2);
+        CHECK(text2.has_value());
+        bool warned = false;
+        for (const auto& w : warnings2) {
+          if (w.find("不在本次输出里") != std::string::npos) warned = true;
+        }
+        CHECK(warned);
+
+        // 自己指向自己：绝不能真写进产物（那是死循环），要告警并按直连处理
+        auto self = subconv::parse_node(
+            "vless://b831381d-6324-4d53-ad4f-8cda48b30811@a.example.com:443?encryption=none#环");
+        CHECK(self.has_value());
+        if (self) {
+          self->source_name = "环";
+          self->dialer_proxy = "环";
+          std::vector<std::string> self_warnings;
+          auto self_text = subconv::emit_config(subconv::NodeList{*self}, opts2, &self_warnings);
+          CHECK(self_text.has_value());
+          if (self_text) {
+            const Json j2 = Json::parse(*self_text, nullptr, false);
+            for (const auto& o : j2["outbounds"]) {
+              CHECK(!o["streamSettings"].contains("sockopt") ||
+                    o["streamSettings"]["sockopt"].value("dialerProxy", std::string()) != "环");
+            }
+          }
+          bool guarded = false;
+          for (const auto& w : self_warnings) {
+            if (w.find("指向它自己") != std::string::npos) guarded = true;
+          }
+          CHECK(guarded);
+        }
+
+        // A -> B -> A：内核不一定拒绝这种配置（实测 Xray 26 对它报 Configuration OK），
+        // 必须由转换器自己拦下来 —— 否则产物「能加载、永远连不上」。
+        auto make = [](const char* name, const char* server, const char* dialer) {
+          auto node = subconv::parse_node(
+              "vless://b831381d-6324-4d53-ad4f-8cda48b30811@" + std::string(server) +
+              ":443?encryption=none&security=tls&sni=" + server + "#" + name);
+          CHECK(node.has_value());
+          if (node) {
+            node->source_name = name;
+            node->dialer_proxy = dialer;
+          }
+          return node ? *node : subconv::ProxyNode{};
+        };
+        const subconv::NodeList cyclic_nodes = {make("A", "a.example.com", "B"),
+                                                make("B", "b.example.com", "A")};
+        for (const char* target : {"xray", "clash", "singbox"}) {
+          subconv::EmitOptions opts3;
+          opts3.target = target;
+          auto cyclic = subconv::emit_config(cyclic_nodes, opts3);
+          CHECK(!cyclic.has_value());
+          if (!cyclic) CHECK(cyclic.error().message.find("成环") != std::string::npos);
+        }
+        // 单向 A -> B（不成环）必须照常产出
+        const subconv::NodeList one_way = {make("A", "a.example.com", "B"),
+                                           make("B", "b.example.com", "")};
+        subconv::EmitOptions opts4;
+        opts4.target = "xray";
+        auto ok = subconv::emit_config(one_way, opts4);
+        CHECK(ok.has_value());
+        if (ok) CHECK(ok->find("dialerProxy") != std::string::npos);
+      }
+    }
+  }
+
+  // --- 两条不同出站共用一个标识：源配置自身就歧义，不能按订阅顺序赌一个目标 ---
+  {
+    const std::string ambiguous = R"([
+      { "remarks": "重复 TAG",
+        "outbounds": [
+          { "protocol": "vless", "tag": "DUP",
+            "settings": { "vnext": [ { "address": "first.example.com", "port": 443,
+              "users": [ { "id": "b831381d-6324-4d53-ad4f-8cda48b30811", "encryption": "none" } ] } ] },
+            "streamSettings": { "network": "tcp", "security": "none",
+                                "sockopt": { "dialerProxy": "DUP" } } },
+          { "protocol": "vless", "tag": "DUP",
+            "settings": { "vnext": [ { "address": "second.example.com", "port": 443,
+              "users": [ { "id": "b831381d-6324-4d53-ad4f-8cda48b30811", "encryption": "none" } ] } ] },
+            "streamSettings": { "network": "tcp", "security": "none" } }
+        ] }
+    ])";
+    auto dup = subconv::parse_subscription(ambiguous);
+    CHECK(dup.has_value());
+    if (dup) {
+      CHECK_EQ(dup->nodes.size(), std::size_t{2});
+      std::vector<std::string> dup_warnings;
+      subconv::EmitOptions dup_opts;
+      dup_opts.target = "xray";
+      auto dup_text = subconv::emit_config(dup->nodes, dup_opts, &dup_warnings);
+      CHECK(dup_text.has_value());
+      bool flagged = false;
+      for (const auto& w : dup_warnings) {
+        if (w.find("歧义") != std::string::npos) flagged = true;
+      }
+      CHECK(flagged);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 后置代理（chain_rear）：本地 → 节点 → 后置 → 目标
+//
+// 链路字段（dialerProxy / dialer-proxy / detour）的含义是「本出站经谁出去」，
+// 所以方向与「谁拨号到目标」相反：加了后置之后，**真正拨号到目标的是后置链路的末端**，
+// 流量落点必须跟着挪到末端，否则整条链路等于没接上。
+// ---------------------------------------------------------------------------
+void test_chain_rear() {
+  section("链式代理（后置 / 出口）");
+  const std::string uuid = "b831381d-6324-4d53-ad4f-8cda48b30811";
+  const std::string fixture =
+      "ss://" + base64_encode("aes-256-gcm:pw") + "@ss.example.com:8388#SS\n" +
+      "vless://" + uuid + "@vl.example.com:443?encryption=none&security=tls&sni=vl.example.com#VL\n";
+  const std::string hop_link = "socks5://front:pass@10.0.0.1:1080#入口";
+  const std::string rear_link = "socks5://back:pass@10.0.0.2:1080#出口";
+
+  auto sub = subconv::parse_subscription(fixture);
+  CHECK(sub.has_value());
+  if (!sub) return;
+  CHECK_EQ(sub->nodes.size(), std::size_t{2});
+
+  // --- xray：落点挪到后置末端，节点自己不改名、不挂 dialerProxy ---
+  {
+    subconv::EmitOptions opts;
+    opts.target = "xray";
+    opts.chain_rear = {rear_link};
+    std::vector<std::string> warnings;
+    auto text = subconv::emit_config(sub->nodes, opts, &warnings);
+    CHECK(text.has_value());
+    if (text) {
+      const Json j = Json::parse(*text, nullptr, false);
+      CHECK(!j.is_discarded());
+      auto find_out = [&](const std::string& tag) -> const Json* {
+        for (const auto& o : j["outbounds"]) {
+          if (o["tag"].get<std::string>() == tag) return &o;
+        }
+        return nullptr;
+      };
+      auto dialer_of = [&](const std::string& tag) -> std::string {
+        const Json* o = find_out(tag);
+        if (o == nullptr) return "<missing>";
+        return (*o)["streamSettings"].contains("sockopt")
+                   ? (*o)["streamSettings"]["sockopt"].value("dialerProxy", std::string())
+                   : std::string();
+      };
+      auto selector_has = [&](const std::string& tag) {
+        for (const auto& t : j["routing"]["balancers"][0]["selector"]) {
+          if (t.get<std::string>() == tag) return true;
+        }
+        return false;
+      };
+
+      // 节点保留原名，且没有前置链路时自己是直连出去的
+      CHECK(find_out("SS") != nullptr);
+      CHECK(find_out("VL") != nullptr);
+      CHECK_EQ(dialer_of("SS"), std::string());
+      CHECK_EQ(dialer_of("VL"), std::string());
+
+      // 每个节点一份后置末端：名字写明链路，并回指它自己那个节点
+      CHECK(find_out("SS → 出口") != nullptr);
+      CHECK(find_out("VL → 出口") != nullptr);
+      CHECK_EQ(dialer_of("SS → 出口"), std::string("SS"));
+      CHECK_EQ(dialer_of("VL → 出口"), std::string("VL"));
+
+      // 末端是外部分享链接，必须真的作为独立出站产出（不是只在名字上出现）
+      const Json* tail = find_out("SS → 出口");
+      CHECK(tail != nullptr);
+      if (tail != nullptr) {
+        CHECK_EQ((*tail)["protocol"], std::string("socks"));
+        CHECK_EQ((*tail)["settings"]["servers"][0]["address"], std::string("10.0.0.2"));
+      }
+
+      // 流量落点 = 后置末端；节点自己不再直接进 balancer / observatory
+      CHECK(selector_has("SS → 出口"));
+      CHECK(selector_has("VL → 出口"));
+      CHECK(!selector_has("SS"));
+      CHECK(!selector_has("VL"));
+      CHECK_EQ(j["routing"]["balancers"][0]["fallbackTag"], std::string("SS → 出口"));
+      for (const auto& t : j["observatory"]["subjectSelector"]) {
+        CHECK(t.get<std::string>() != "SS");
+        CHECK(t.get<std::string>() != "VL");
+      }
+    }
+  }
+
+  // --- 前置 + 后置同时给：本地 → 入口 → 节点 → 出口 → 目标 ---
+  {
+    subconv::EmitOptions opts;
+    opts.target = "xray";
+    opts.chain = {hop_link};
+    opts.chain_rear = {rear_link};
+    auto text = subconv::emit_config(sub->nodes, opts);
+    CHECK(text.has_value());
+    if (text) {
+      const Json j = Json::parse(*text, nullptr, false);
+      CHECK(!j.is_discarded());
+      auto dialer_of = [&](const std::string& tag) -> std::string {
+        for (const auto& o : j["outbounds"]) {
+          if (o["tag"].get<std::string>() != tag) continue;
+          return o["streamSettings"].contains("sockopt")
+                     ? o["streamSettings"]["sockopt"].value("dialerProxy", std::string())
+                     : std::string();
+        }
+        return "<missing>";
+      };
+      CHECK_EQ(dialer_of("入口"), std::string());          // 最外侧，直连
+      CHECK_EQ(dialer_of("SS"), std::string("入口"));       // 节点接在入口后面
+      CHECK_EQ(dialer_of("SS → 出口"), std::string("SS"));  // 末端接在节点后面
+    }
+  }
+
+  // --- 后置引用订阅里的节点：也必须每个节点克隆一份（不能复用同一条出站）---
+  {
+    subconv::EmitOptions opts;
+    opts.target = "xray";
+    opts.chain_rear = {"@VL"};
+    auto text = subconv::emit_config(sub->nodes, opts);
+    CHECK(text.has_value());
+    if (text) {
+      const Json j = Json::parse(*text, nullptr, false);
+      CHECK(!j.is_discarded());
+      int cloned = 0;
+      for (const auto& o : j["outbounds"]) {
+        if (o["tag"].get<std::string>() == "SS → VL") ++cloned;
+      }
+      CHECK_EQ(cloned, 1);
+      for (const auto& o : j["outbounds"]) {
+        if (o["tag"].get<std::string>() != "SS → VL") continue;
+        CHECK_EQ(o["streamSettings"]["sockopt"]["dialerProxy"], std::string("SS"));
+      }
+    }
+  }
+
+  // --- clash：末端进分组，节点自己不进 ---
+  {
+    subconv::EmitOptions opts;
+    opts.target = "clash";
+    opts.chain_rear = {rear_link};
+    auto text = subconv::emit_config(sub->nodes, opts);
+    CHECK(text.has_value());
+    if (text) {
+      CHECK(text->find("dialer-proxy: SS") != std::string::npos);
+      CHECK(text->find("SS → 出口") != std::string::npos);
+      CHECK(text->find("dialer-proxy: 出口") == std::string::npos);   // 末端不再挂后置
+      // R1：只有后置链时头部不能打出「本地 ->  -> 每个节点」那种中间空一截的注释
+      CHECK(text->find("本地 ->  -> ") == std::string::npos);
+      CHECK(text->find("# 链式代理: 本地 -> 每个节点 -> 后置 -> 目标") != std::string::npos);
+    }
+  }
+
+  // --- sing-box：末端进 selector，节点自己不进 ---
+  {
+    subconv::EmitOptions opts;
+    opts.target = "singbox";
+    opts.chain_rear = {rear_link};
+    auto text = subconv::emit_config(sub->nodes, opts);
+    CHECK(text.has_value());
+    if (text) {
+      const Json j = Json::parse(*text, nullptr, false);
+      CHECK(!j.is_discarded());
+      bool tail_detour = false;
+      for (const auto& o : j["outbounds"]) {
+        if (o["tag"].get<std::string>() == "SS → 出口") {
+          tail_detour = o.value("detour", std::string()) == "SS";
+        }
+      }
+      CHECK(tail_detour);
+      bool in_selector = false;
+      for (const auto& s : j["outbounds"]) {
+        if (s.value("type", std::string()) != "selector") continue;
+        for (const auto& t : s["outbounds"]) {
+          if (t.get<std::string>() == "SS → 出口") in_selector = true;
+          CHECK(t.get<std::string>() != "SS");
+        }
+      }
+      CHECK(in_selector);
+    }
+  }
+
+  // --- 分享链接格式没有链路字段：必须告警，且点名是 --chain-rear ---
+  {
+    subconv::EmitOptions opts;
+    opts.target = "links";
+    opts.chain_rear = {rear_link};
+    std::vector<std::string> warnings;
+    auto text = subconv::emit_config(sub->nodes, opts, &warnings);
+    CHECK(text.has_value());
+    bool flagged = false;
+    for (const auto& w : warnings) {
+      if (w.find("--chain-rear") != std::string::npos) flagged = true;
+    }
+    CHECK(flagged);
+  }
+
+  // --- 后置项解析不出来时必须报错，绝不静默降级成直连 ---
+  {
+    subconv::EmitOptions opts;
+    opts.target = "xray";
+    opts.chain_rear = {"@不存在的节点"};
+    auto text = subconv::emit_config(sub->nodes, opts);
+    CHECK(!text.has_value());
+  }
+}
+
 // ---------------------------------------------------------------------------
 void test_share_links() {
   section("分享链接 / v2rayNG");
@@ -2521,6 +3219,10 @@ void test_vless_encryption() {
   CHECK(!subconv::parse_vless_encryption(enc + ".50-0-3333.75-0-111.100-0-1").problem.empty());
   // 概率超过 100
   CHECK(!subconv::parse_vless_encryption(enc + ".101-1-2").problem.empty());
+  // 认证参数解不出可用密钥（被截断 / 占位符）：内核会**直接拒绝加载整份配置**
+  // （实测 mihomo 报 failed to use encryption），所以必须在这里就标出来。
+  CHECK(!subconv::parse_vless_encryption("mlkem768x25519plus.native.0rtt.AAAA").problem.empty());
+  CHECK(!subconv::parse_vless_encryption("mlkem768x25519plus.native.0rtt.!!!").problem.empty());
 
   // --- 分享链接解析 ---
   auto node = subconv::parse_node(
@@ -2708,6 +3410,8 @@ int main() {
   test_ca_bundle();
   test_console_encoding();
   test_share_links();
+  test_proxy_chain();
+  test_chain_rear();
   test_v2rayn_share();
   test_xhttp();
   test_vless_encryption();

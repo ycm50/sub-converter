@@ -33,8 +33,13 @@ struct RuleSetDef {
 /// 目录表。展示顺序 = 这里定义的顺序；`rules:` 里的实际顺序见文件头注释。
 const std::vector<RuleSetDef>& catalogue_defs() {
   static const std::vector<RuleSetDef> defs = {
-      {"local", "直连本地", "DIRECT", "局域网 / 保留地址（GEOIP,LAN + GEOIP,private）",
-       {"GEOIP,LAN,DIRECT,no-resolve", "GEOIP,private,DIRECT,no-resolve"}},
+      // 只留 GEOIP,LAN：mihomo 的 GEOIP 把 `lan` 当唯一伪规则（rules/common/geoip.go 的
+      // NewGEOIP 里只有 `if country == "lan"`），而 isLan() 本身就是
+      // ip.IsPrivate() || IsLoopback() || IsLinkLocalUnicast() || … —— 私有地址已经全覆盖。
+      // `GEOIP,private` 会把 private 当国家码去 LoadGeoIPMatcher：mmdb 模式下永不命中，
+      // geodata 模式下直接加载失败。与本文件「GEOIP 只用于通用国家码」的约定也自相矛盾。
+      {"local", "直连本地", "DIRECT", "局域网 / 保留地址（GEOIP,LAN）",
+       {"GEOIP,LAN,DIRECT,no-resolve"}},
       {"cn", "中国直连", "DIRECT", "中国域名与 IP（GEOSITE,cn + GEOIP,CN）",
        {"GEOSITE,cn,DIRECT", "GEOIP,CN,DIRECT"}},
       {"ir", "伊朗直连", "DIRECT", "伊朗域名与 IP（GEOSITE,category-ir + GEOIP,IR）",

@@ -71,6 +71,31 @@ void print_usage(std::FILE* out) {
       --ipv6 / --no-ipv6   根节点与 dns 段的 ipv6，默认开
       --name <订阅名>      写进配置首行注释，并作为下载文件名（自动补扩展名）
 
+链式代理:
+      --chain <值>         前置代理链路（别名 --front-proxy），可重复，
+                           按「最外侧 -> 最内侧」的顺序；
+                           产物变成「本地 -> chain1 -> chain2 -> ... -> 每个节点」
+                           （节点自己拨号到目标）
+                           值有两种写法：
+                             * 分享链接（ss:// vmess:// vless:// trojan:// socks5:// http:// ...）
+                               —— 作为独立出站追加进配置
+                             * 订阅里某个节点的名字（可写 @名字）—— 直接复用那个节点
+      --chain-rear <值>    后置代理链路（别名 --rear-proxy），可重复，
+                           按「最内侧 -> 最外侧」的顺序；
+                           产物变成「本地 -> ... -> 每个节点 -> rear1 -> rear2 -> ... -> 目标」
+                           链路字段的方向与"谁拨号到目标"是反的，所以流量落点会变成后置链路的
+                           **末端**：末端出站的名字写成「节点 -> 后置」，节点自己不改名，
+                           照旧直连（或接在前置链路后面）。效果就是从客户端里选
+                           「节点 -> 后置」得到「本地 -> 节点 -> 后置 -> 目标」
+                           —— 正是"用 A 当入口、用 B 当出口"。
+                           每个节点都会克隆一份后置链路（rear1 必须经各自的节点出去），
+                           所以 N 个节点配 m 跳会多出 N×m 个出站。值的写法与 --chain 相同。
+                           两者都落在：xray 的 sockopt.dialerProxy / clash 的 dialer-proxy /
+                           singbox 的 detour；links / base64 / v2rayn 没有该字段，会告警并忽略
+                           注意：链路按 TCP 建隧道，凡是"经隧道被拨到"的那一跳（前置链路下的
+                           节点、后置链路的每一跳）若是 hysteria2 / tuic / wireguard 或
+                           quic / kcp 传输就链不通（会告警）
+
 抓取:
       --proxy <URL>        http:// 或 socks5:// 代理
       --ua <字符串>        User-Agent，默认 clash-verge/v2.0.0
@@ -250,6 +275,20 @@ int parse_args(int argc, char** argv, Options& opt, std::string& error) {
       opt.emit.probe_cert_timeout_seconds = static_cast<int>(value);
     } else if (arg == "--list-dns") {
       opt.list_dns = true;
+    } else if (arg == "--chain" || arg == "--front-proxy") {
+      const char* v = need(i, "--chain");
+      if (v == nullptr) return -1;
+      // 可重复、按「最外侧 → 最内侧」的顺序；值要么是分享链接，要么是订阅里的节点名。
+      // argv 在 Windows 上是 ACP(GBK)，节点名可能是中文，先转成 UTF-8（同 --name）。
+      const std::string item = subconv::codec::trim(subconv::console::ansi_to_utf8(v));
+      if (!item.empty()) opt.emit.chain.push_back(item);
+    } else if (arg == "--chain-rear" || arg == "--rear-proxy") {
+      const char* v = need(i, arg.c_str());
+      if (v == nullptr) return -1;
+      // 可重复、按「最内侧 → 最外侧」的顺序（第 0 项紧跟在节点后面）。
+      // 每项都会按节点克隆一份，所以 N 个节点 × m 跳会多出 N×m 个出站。
+      const std::string item = subconv::codec::trim(subconv::console::ansi_to_utf8(v));
+      if (!item.empty()) opt.emit.chain_rear.push_back(item);
     } else if (arg == "--name") {
       const char* v = need(i, "--name");
       if (v == nullptr) return -1;

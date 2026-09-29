@@ -3,6 +3,8 @@
 // Xray 的能力边界与 Clash / sing-box 不同，必须显式区分：
 //   支持：ss(AEAD/2022) / vmess / vless / trojan / socks / http
 //   不支持：ssr / snell / hysteria / hysteria2 / tuic（这些由 mihomo / sing-box 承载）
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -32,7 +34,9 @@ std::string effective_sni(const ProxyNode& n) {
   return n.tls.sni.empty() ? n.server : n.tls.sni;
 }
 
-Json build_stream_settings(const ProxyNode& n) {
+/// dialer 非空时写进 `sockopt.dialerProxy`：本出站的底层连接先交给那条出站去建。
+/// Xray 文档原话是「一个出站代理的标识……通常用于配置链式代理」，是 Xray 唯一的链路表达。
+Json build_stream_settings(const ProxyNode& n, const std::string& dialer = {}) {
   Json stream = Json::object();
 
   // ---- 传输层 ----
@@ -40,7 +44,7 @@ Json build_stream_settings(const ProxyNode& n) {
     case Network::Ws: {
       stream["network"] = "ws";
       Json ws = Json::object();
-      ws["path"] = n.ws.path.empty() ? "/" : n.ws.path;
+      ws["path"] = normalize_transport_path(n.ws.path);
       Json headers = Json::object();
       if (!n.ws.host.empty()) headers["Host"] = n.ws.host;
       for (const auto& [k, v] : n.ws.headers) headers[k] = v;
@@ -132,12 +136,18 @@ Json build_stream_settings(const ProxyNode& n) {
     stream["security"] = "none";
   }
 
-  if (n.tfo) stream["sockopt"] = Json{{"tcpFastOpen", true}};
+  if (n.tfo || !dialer.empty()) {
+    Json sockopt = Json::object();
+    if (n.tfo) sockopt["tcpFastOpen"] = true;
+    if (!dialer.empty()) sockopt["dialerProxy"] = dialer;
+    stream["sockopt"] = std::move(sockopt);
+  }
   return stream;
 }
 
 /// 返回 Null 表示该协议 Xray 不支持（已记录 warning）。
-Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
+Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings,
+                    const std::string& dialer = {}) {
   auto reject = [&](const char* why) {
     warnings.push_back(std::string("跳过节点 ") + n.name + "（" + to_string(n.protocol) +
                        "）：Xray " + why);
@@ -160,7 +170,7 @@ Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
       vnext["port"] = n.port;
       vnext["users"] = Json::array({std::move(user)});
       out["settings"] = Json{{"vnext", Json::array({std::move(vnext)})}};
-      out["streamSettings"] = build_stream_settings(n);
+      out["streamSettings"] = build_stream_settings(n, dialer);
       out["mux"] = Json{{"enabled", false}, {"concurrency", 8}};
       break;
     }
@@ -178,7 +188,7 @@ Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
       vnext["port"] = n.port;
       vnext["users"] = Json::array({std::move(user)});
       out["settings"] = Json{{"vnext", Json::array({std::move(vnext)})}};
-      out["streamSettings"] = build_stream_settings(n);
+      out["streamSettings"] = build_stream_settings(n, dialer);
       out["mux"] = Json{{"enabled", false}, {"concurrency", 8}};
       break;
     }
@@ -190,7 +200,7 @@ Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
       server["password"] = n.password;
       server["level"] = 0;
       out["settings"] = Json{{"servers", Json::array({std::move(server)})}};
-      out["streamSettings"] = build_stream_settings(n);
+      out["streamSettings"] = build_stream_settings(n, dialer);
       out["mux"] = Json{{"enabled", false}, {"concurrency", 8}};
       break;
     }
@@ -207,7 +217,7 @@ Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
       server["uot"] = false;
       server["level"] = 0;
       out["settings"] = Json{{"servers", Json::array({std::move(server)})}};
-      out["streamSettings"] = build_stream_settings(n);
+      out["streamSettings"] = build_stream_settings(n, dialer);
       break;
     }
     case Protocol::Socks5: {
@@ -220,6 +230,9 @@ Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
             {Json{{"user", n.username}, {"pass", n.password}, {"level", 0}}});
       }
       out["settings"] = Json{{"servers", Json::array({std::move(server)})}};
+      // socks 出站平时不需要 streamSettings（没有传输层与安全层），但链路的 dialerProxy
+      // 就住在 sockopt 里 —— 少了它这个节点会静默变成直连。
+      if (!dialer.empty()) out["streamSettings"] = build_stream_settings(n, dialer);
       break;
     }
     case Protocol::Http: {
@@ -232,7 +245,7 @@ Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
             {Json{{"user", n.username}, {"pass", n.password}, {"level", 0}}});
       }
       out["settings"] = Json{{"servers", Json::array({std::move(server)})}};
-      if (n.tls.enabled) out["streamSettings"] = build_stream_settings(n);
+      if (n.tls.enabled || !dialer.empty()) out["streamSettings"] = build_stream_settings(n, dialer);
       break;
     }
     case Protocol::WireGuard: {
@@ -292,9 +305,14 @@ Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
 
       out["protocol"] = "wireguard";
       out["settings"] = std::move(settings);
-      // wireguard 出站没有 streamSettings 概念，安全层显式写 none；mux 对它也无意义，
+      // wireguard 出站没有传输层概念，安全层显式写 none；mux 对它也无意义，
       // 但 Xray 的默认 mux 配置会拖慢建连，统一按其它节点写成关闭。
-      out["streamSettings"] = Json{{"security", "none"}};
+      // dialerProxy 是 TCP 隧道，而 WG 到 endpoint 走的是 UDP，所以它只能待在链路最外层
+      // （chain[0]）—— 别的位置由 chain_tunnel_blocker 拦下，不会走到这里。
+      Json wg_stream = Json::object();
+      wg_stream["security"] = "none";
+      if (!dialer.empty()) wg_stream["sockopt"] = Json{{"dialerProxy", dialer}};
+      out["streamSettings"] = std::move(wg_stream);
       out["mux"] = Json{{"enabled", false}, {"concurrency", 8}};
       break;
     }
@@ -311,18 +329,119 @@ Result<std::string> emit_xray(const NodeList& nodes, const EmitOptions& opts,
   const NodeList prepared = prepare_nodes(nodes, opts);
   if (prepared.empty()) return fail("去重后没有可输出的节点");
 
+  // 链式代理：先解析链路，再决定每个出站的 dialerProxy。
+  // 链路是用户显式指定的基础设施 —— 任何一跳写不出来就直接报错，绝不静默降级成直连
+  // （那会把所有流量按真实 IP 放出去，是这个工具最不能出的错）。
+  auto plan = resolve_chain(prepared, opts, warnings);
+  if (!plan) return fail(plan.error());
+  const std::map<std::string, std::string> ref_index = build_dialer_index(prepared);
+  // 输入自带引用成环时先拦下来：内核不一定拒绝这种配置（实测 Xray 26 对 A→B→A 报
+  // Configuration OK），真连上去才会死循环 / 超时。
+  if (!plan->active()) {
+    if (const auto cycle = dialer_cycle(prepared, ref_index); !cycle.empty()) {
+      return fail("输入配置的链式代理成环：" + codec::join(cycle, " -> ") +
+                  "（dialerProxy 首尾相接会死循环，无法转换）");
+    }
+  }
+
   std::vector<std::string> skipped;
   Json outbounds = Json::array();
   Json node_tags = Json::array();
   std::size_t need_pin = 0;
+
+  // 外部链路跳点排在最前面：读起来就是「本地 → 跳1 → 跳2 → … → 每个节点」。
+  // 引用订阅节点的跳点（extra=false）不重复产出，直接复用节点自己那条出站。
+  std::set<std::string> hop_names;
+  for (const auto& hop : plan->hops) {
+    hop_names.insert(hop.tag);
+    // 带 dialer 的跳点要经上一条出站的 TCP 隧道到达，UDP 传输的协议到不了。
+    // 这是用户显式指定的基础设施 —— 直接报错，绝不静默丢掉。
+    // 要在 `continue` 之前判：引用订阅节点的跳点（extra=false）不在这里产出出站，
+    // 但它的 dialer 一样会被写进那份复用出来的出站上。
+    if (!hop.dialer.empty()) {
+      const std::string blocker = chain_tunnel_blocker(hop.node);
+      if (!blocker.empty()) {
+        return fail("链路节点 " + hop.node.name + " 不能作为链路中间跳点：" + blocker);
+      }
+    }
+    if (!hop.extra) continue;
+    std::vector<std::string> hop_warnings;
+    Json out = build_outbound(hop.node, hop_warnings, hop.dialer);
+    if (out.is_null()) {
+      return fail("链路节点 " + hop.node.name + " 无法写进 Xray 配置：" +
+                  (hop_warnings.empty() ? std::string("不支持该协议")
+                                        : codec::join(hop_warnings, "；")) +
+                  target_capability_hint(hop.node, "xray"));
+    }
+    for (auto& w : hop_warnings) skipped.push_back(std::move(w));
+    outbounds.push_back(std::move(out));
+  }
+
   for (const auto& node : prepared) {
-    Json out = build_outbound(node, skipped);
-    if (out.is_null()) continue;
+    const std::string dialer = effective_dialer(node, *plan, ref_index, warnings);
+    // 有后置链路时，这个节点自己变成链路里的中间跳点，流量落点是后置链路的末端
+    // （末端出站的名字里带着「节点 → 后置」，客户端里选中它才是走链路的路径）。
+    const RearChain* rear = plan->rear_for(node.name);
+
+    // 前置链路会把「每个节点」都变成要经 TCP 隧道到达的一跳，UDP 传输的协议到不了。
+    // 候选节点按「被跳过」处理（丢掉候选不会让流量按真实 IP 出去）；被链路点名的节点
+    // 是用户的基础设施，不能丢 —— 直接报错。
+    if (!dialer.empty()) {
+      const std::string blocker = chain_tunnel_blocker(node);
+      if (!blocker.empty()) {
+        if (hop_names.count(node.name) != 0) {
+          return fail("链路节点 " + node.name + " 不能作为链路中间跳点：" + blocker);
+        }
+        skipped.push_back("跳过节点 " + node.name + "：" + blocker +
+                          "（前置链路要求每个节点都经 TCP 隧道到达）");
+        continue;
+      }
+    }
+
+    std::vector<std::string> node_warnings;
+    Json out = build_outbound(node, node_warnings, dialer);
+    if (out.is_null()) {
+      if (rear != nullptr || hop_names.count(node.name) != 0) {
+        return fail("链路节点 " + node.name + " 无法写进 Xray 配置：" +
+                    (node_warnings.empty() ? std::string("不支持该协议")
+                                           : codec::join(node_warnings, "；")) +
+                    "（链路是显式指定的，不能静默降级成直连）" +
+                    target_capability_hint(node, "xray"));
+      }
+      for (auto& w : node_warnings) skipped.push_back(std::move(w));
+      continue;
+    }
+    // 成功产出时也可能带告警 —— 必须在成功分支一并收下，别让提示消失。
+    for (auto& w : node_warnings) skipped.push_back(std::move(w));
     if (node.tls.insecure && !node.tls.reality && node.tls.pinned_cert_sha256.empty() &&
         node.is_tls()) {
       ++need_pin;
     }
-    node_tags.push_back(node.name);
+
+    if (rear != nullptr) {
+      // 后置链路：逐跳产出，hops.back() 才是流量落点。
+      // 每一跳都是经上一跳的 TCP 隧道到达的，所以每一跳都要过 UDP 兼容性检查。
+      for (const auto& hop : rear->hops) {
+        const std::string blocker = chain_tunnel_blocker(hop.node);
+        if (!blocker.empty()) {
+          return fail("后置链路节点 " + hop.node.name + " 不能作为链路中间跳点：" + blocker);
+        }
+        std::vector<std::string> hop_warnings;
+        Json hout = build_outbound(hop.node, hop_warnings, hop.dialer);
+        if (hout.is_null()) {
+          return fail("后置链路节点 " + hop.node.name + " 无法写进 Xray 配置：" +
+                      (hop_warnings.empty() ? std::string("不支持该协议")
+                                            : codec::join(hop_warnings, "；")) +
+                      "（链路是显式指定的，不能静默降级成直连）" +
+                      target_capability_hint(hop.node, "xray"));
+        }
+        for (auto& w : hop_warnings) skipped.push_back(std::move(w));
+        outbounds.push_back(std::move(hout));
+      }
+      node_tags.push_back(rear->target());
+    } else {
+      node_tags.push_back(node.name);
+    }
     outbounds.push_back(std::move(out));
   }
   if (warnings != nullptr) {
@@ -335,7 +454,7 @@ Result<std::string> emit_xray(const NodeList& nodes, const EmitOptions& opts,
           "客户端会表现为全部 -1）→ 加 --probe-cert 探测对端证书指纹即可放行");
     }
   }
-  if (outbounds.empty()) {
+  if (node_tags.empty()) {
     const std::string detail =
         skipped.empty() ? std::string() : ("\n  - " + codec::join(skipped, "\n  - "));
     return fail("没有任何节点能转换为 Xray 配置" + detail);

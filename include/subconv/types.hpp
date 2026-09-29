@@ -34,7 +34,16 @@ enum class Protocol {
 /// Clash `type` 字段名，与 to_string 基本一致，个别协议不同。
 [[nodiscard]] const char* clash_type(Protocol p) noexcept;
 [[nodiscard]] std::optional<Protocol> protocol_from_string(std::string_view s) noexcept;
-[[nodiscard]] bool protocol_is_dialer(Protocol p) noexcept;
+/// 该协议的「自身传输」是否基于 UDP：hysteria / hysteria2 / tuic / wireguard。
+///
+/// 这类协议只能放在链式代理的**最外层**（那一跳直连出去）。链路上其余位置都得先经上一条
+/// 出站的 TCP 隧道到达（dialerProxy / dialer-proxy / detour 都只建 TCP 隧道），而它们的
+/// 协议必须直接对本机服务端说话 —— UDP 报文塞不进 TCP 隧道。内核会照常加载这种配置，
+/// 但连接永远建不起来，表现就是「一直超时」。
+///
+/// 取代了先前那个全仓库没有调用点、且对 hysteria / tuic / wireguard 也返回 true 的
+/// `protocol_is_dialer`（名字与语义都对不上：那些协议恰恰**不能**被隧道承载）。
+[[nodiscard]] bool protocol_is_udp_transport(Protocol p) noexcept;
 
 // ---------------------------------------------------------------------------
 // 传输层
@@ -216,6 +225,16 @@ struct ProxyNode {
   bool tfo = false;
   bool mptcp = false;
   bool scv = false;                 ///< 单项跳过证书校验（覆盖 tls.insecure）
+
+  /// 链式代理引用（**输入侧**原样保留的那一份）：本节点建立连接前要先经过的出站。
+  ///   * Xray JSON：`streamSettings.sockopt.dialerProxy`
+  ///   * mihomo / Clash：`dialer-proxy`
+  /// 值是**对方配置里**的标识（Xray 的出站 tag / mihomo 的代理名），所以输出时要先按
+  /// source_name 反查成本工具最终使用的名字（含 emoji 与去重后缀）。空串 = 直连。
+  std::string dialer_proxy;
+  /// 输入侧的原标识：Xray 出站的 `tag`、mihomo 代理的 `name`。
+  /// 只用于解析 `dialer_proxy` 的引用关系 —— 本工具自己的名字会经过 emoji / 去重改名。
+  std::string source_name;
 
   /// 已解码但尚未建模的字段，避免信息丢失。
   std::map<std::string, std::string> extra;

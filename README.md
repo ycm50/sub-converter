@@ -29,6 +29,7 @@
 - [客户端导入](#客户端导入)
 - [分享链接输出（v2rayNG）](#分享链接输出v2rayng)
 - [分流规则集（rules，仅 Clash 目标）](#分流规则集rules仅-clash-目标)
+- [链式代理（前置 / 中转）](#链式代理前置--中转)
 - [DNS（dns.nameserver）与 IPv6](#dnsdnsnameserver与-ipv6)
 - [订阅名称](#订阅名称)
 - [Web UI 与 HTTP 接口](#web-ui-与-http-接口)
@@ -55,6 +56,13 @@
   而 Clash 配置对 key 顺序与引号敏感，只有自己掌控才能保证输出确定、可读、可校验。
 - **两端对齐分享链接**：`links` / `base64` / `v2rayn` 的形态是逐字段核对 v2rayNG(`com.v2ray.ang.fmt.*Fmt`)
   与 v2rayN(`ServiceLib/Handler/Fmt/*`) 源码得出的，并用往返测试（生成 → 自己解析回来 → 逐字段比对）保证。
+- **链式代理（前置 / 后置）**：`--chain` / `--chain-rear`（`?chain=` / `?chain_rear=`，
+  Web UI 的「前置代理 / 后置代理」）。前置产出「本地 → 前置 → 中转 → … → 每个节点」，
+  后置产出「… → 每个节点 → 后置 → … → 目标」—— 后者把**流量落点挪到后置链路的末端**
+  （即"拿节点当入口、拿后置当出口"），所以每个节点都会克隆一份后置链路。
+  两者分别落到 Xray 的 `sockopt.dialerProxy`、mihomo 的 `dialer-proxy`、sing-box 的 `detour`；
+  输入里已有的链路也会被解析并原样再输出 ——
+  见「[链式代理](#链式代理前置--后置)」。
 - **真实内核校验**：每个目标都用 mihomo / Xray / sing-box 的真实二进制校验产物。
 - **Windows 编码认真处理**：内部字符串一律 UTF-8，控制台输出按代码页转换，中文订阅名与中文路径都可用。
 - **一份源码、九个平台**：Linux（x86_64 / aarch64 / armv7l / i686 / riscv64）、
@@ -75,7 +83,7 @@
 
 > **当前状态**：M0–M3、M5 已完成，M4 进行中。
 > Clash 目标已生成 3 个 emoji 分组（🚀 节点选择 / ♻️ 自动选择 / 🐟 漏网之鱼，`--no-emoji` 可关闭）
-> 与可挑选的 rules（默认 5 条：`GEOIP,LAN` / `GEOIP,private` / `GEOSITE,cn` / `GEOIP,CN` / `MATCH`，
+> 与可挑选的 rules（默认 4 条：`GEOIP,LAN` / `GEOSITE,cn` / `GEOIP,CN` / `MATCH`，
 > 用 `--rulesets` 或 Web UI 的复选增减）；
 > 另有可挑选的 `dns.nameserver`（默认 `cloudflare,google`，**不再是原来的 223.5.5.5**）与
 > `ipv6`（默认 **开**），见「[DNS 与 IPv6](#dnsdnsnameserver与-ipv6)」；还支持设置订阅名称，
@@ -468,7 +476,6 @@ proxy-groups:
       - DIRECT
 rules:
   - GEOIP,LAN,DIRECT,no-resolve
-  - GEOIP,private,DIRECT,no-resolve
   - GEOSITE,cn,DIRECT
   - GEOIP,CN,DIRECT
   - MATCH,🐟 漏网之鱼
@@ -692,6 +699,31 @@ subconv 0.1.0 - 订阅转换工具
       --ipv6 / --no-ipv6   根节点与 dns 段的 ipv6，默认开
       --name <订阅名>      写进配置首行注释，并作为下载文件名（自动补扩展名）
 
+链式代理:
+      --chain <值>         前置代理链路（别名 --front-proxy），可重复，
+                           按「最外侧 -> 最内侧」的顺序；
+                           产物变成「本地 -> chain1 -> chain2 -> ... -> 每个节点」
+                           （节点自己拨号到目标）
+                           值有两种写法：
+                             * 分享链接（ss:// vmess:// vless:// trojan:// socks5:// http:// ...）
+                               —— 作为独立出站追加进配置
+                             * 订阅里某个节点的名字（可写 @名字）—— 直接复用那个节点
+      --chain-rear <值>    后置代理链路（别名 --rear-proxy），可重复，
+                           按「最内侧 -> 最外侧」的顺序；
+                           产物变成「本地 -> ... -> 每个节点 -> rear1 -> rear2 -> ... -> 目标」
+                           链路字段的方向与"谁拨号到目标"是反的，所以流量落点会变成后置链路的
+                           **末端**：末端出站的名字写成「节点 -> 后置」，节点自己不改名，
+                           照旧直连（或接在前置链路后面）。效果就是从客户端里选
+                           「节点 -> 后置」得到「本地 -> 节点 -> 后置 -> 目标」
+                           —— 正是"用 A 当入口、用 B 当出口"。
+                           每个节点都会克隆一份后置链路（rear1 必须经各自的节点出去），
+                           所以 N 个节点配 m 跳会多出 N×m 个出站。值的写法与 --chain 相同。
+                           两者都落在：xray 的 sockopt.dialerProxy / clash 的 dialer-proxy /
+                           singbox 的 detour；links / base64 / v2rayn 没有该字段，会告警并忽略
+                           注意：链路按 TCP 建隧道，凡是"经隧道被拨到"的那一跳（前置链路下的
+                           节点、后置链路的每一跳）若是 hysteria2 / tuic / wireguard 或
+                           quic / kcp 传输就链不通（会告警）
+
 抓取:
       --proxy <URL>        http:// 或 socks5:// 代理
       --ua <字符串>        User-Agent，默认 clash-verge/v2.0.0
@@ -871,7 +903,7 @@ v2rayN（Xray 内核）导入。`clash` / `singbox` / `xray` 目标不受影响�
 
 | id | 名称 | 策略 | 展开成的规则 |
 |---|---|---|---|
-| `local` | 直连本地 | DIRECT | `GEOIP,LAN`、`GEOIP,private` |
+| `local` | 直连本地 | DIRECT | `GEOIP,LAN`（mihomo 只把 `lan` 当伪规则，且它已覆盖私有地址） |
 | `cn` | 中国直连 | DIRECT | `GEOSITE,cn`、`GEOIP,CN` |
 | `ir` | 伊朗直连 | DIRECT | `GEOSITE,category-ir`、`GEOIP,IR` |
 | `cloudflare` | Cloudflare 直连 | DIRECT | `GEOSITE,cloudflare` |
@@ -897,6 +929,127 @@ v2rayN（Xray 内核）导入。`clash` / `singbox` / `xray` 目标不受影响�
 
 界面里那排复选不是写死在 HTML 里的：列表来自 `GET /api/rulesets`，C++ 侧的 `rule_set_catalogue()`
 是唯一真源，避免两边各维护一份。改 `src/emit/rulesets.cpp` 里的目录表即可增删。
+
+## 链式代理（前置 / 后置）
+
+让产物变成「**本地 → 前置 → 中转 → … → 每个节点**」：客户端先把底层连接交给链路最外侧那一跳，
+再由它连向下一个跳，最后一跳去连真正的节点。适合「便宜的中转机在前面开路、节点不动」这种玩法。
+
+**后置**（`--chain-rear`）是同一件事的反方向：「**… → 每个节点 → 后置 → … → 目标**」，
+也就是「拿节点当**入口**、拿后置当**出口**」—— 用来解决「入口必须是一个能连通的地址，
+但出口得换成一台能访问目标站的机器」这类问题。它有个必须记住的方向细节，见下面「后置代理」。
+
+```powershell
+# 前置是一个 socks5（也可以是 ss/vmess/vless/trojan/hysteria2/http… 的分享链接）
+.\build\subconv.exe -i up.yaml -t xray --chain "socks5://user:pass@10.0.0.1:1080#入口"
+
+# 多跳：外部 socks 在前，订阅里的某个节点在里（最外侧写在最前面）
+.\build\subconv.exe -i up.yaml -t clash --chain "socks5://10.0.0.1:1080#入口" --chain "@香港 中转"
+
+# 只挑订阅里的节点当链路（`@名字` 同样可以省略 @）
+.\build\subconv.exe -i up.yaml -t singbox --chain "香港 中转"
+```
+
+`--chain` 的值有两种写法：
+
+| 写法 | 含义 |
+|---|---|
+| 分享链接（`ss://` `vmess://` `vless://` `trojan://` `hysteria2://` `socks5://` `http(s)://` …） | 解析成节点，**作为额外的一条出站**追加进配置（节点名取链接的 `#备注`，没有就用 `server:port`） |
+| 订阅里某个节点的名字（可写 `@名字`） | **直接复用那条出站**，不重复产出；该节点同时也仍然是可选的落地节点 |
+
+### 后置代理（`--chain-rear`）：用节点当入口、用后置当出口
+
+```powershell
+# 拿订阅里的节点当入口，再经一台出口机出去（"反代/中转当入口、VPS 当出口"这类玩法）
+.\build\subconv.exe -i up.yaml -t xray --chain-rear "trojan://pw@exit.example.com:443#出口"
+
+# 前置 + 后置同时给：本地 -> 入口 -> 节点 -> 出口 -> 目标
+.\build\subconv.exe -i up.yaml -t xray --chain "socks5://10.0.0.1:1080#入口" --chain-rear "@落地 出口"
+```
+
+**方向必须记住**：链路字段的含义是「**本出站经谁出去**」，所以它和「谁拨号到目标」是反的 ——
+`--chain` 的最后一跳去连节点（节点自己拨号到目标），而 `--chain-rear` 里**真正拨号到目标的是
+链路的末端**，末端那一跳的 `dialerProxy` 指向它前面一跳正是这个原因。
+
+由此带来几处和前置不一样的地方：
+
+| | 前置 `--chain` | 后置 `--chain-rear` |
+|---|---|---|
+| 顺序 | 最外侧 → 最内侧（第 1 项直连出去） | 最内侧 → 最外侧（第 1 项紧跟节点） |
+| 流量落点 | 就是**节点**本身 | 变成**后置链路的末端** |
+| 出站命名 | 不影响节点名 | 末端名写成 `节点 → 后置`；**节点自己不改名** |
+| 出站数量 | 外部跳点各一条（引用订阅节点时复用节点那条） | **每个节点克隆一份**：N 个节点 × m 跳多出 N×m 条 |
+
+客户端里该选的是 `节点 → 后置` 那个名字，它才代表「经链路到目标」的路径；节点原名那条出站只是
+链路里的中间跳点（不进负载均衡 / 分组）。末端名刻意**不顶替节点原名** —— 否则会出现
+「名叫 A 的出站里装的却是 B 的配置」，正是这个功能最不该有的表述。
+
+落到各内核的字段（语义完全一致，都是「本出站的底层连接交给那条出站去建」）：
+
+| 目标 | 写进哪里 | 文档 |
+|---|---|---|
+| `xray` | `outbounds[].streamSettings.sockopt.dialerProxy` | <https://xtls.github.io/config/transports/sockopt.html> |
+| `clash`（mihomo） | 代理级 `dialer-proxy` | <https://wiki.metacubex.one/config/proxies/dialer-proxy/> |
+| `singbox` | 出站 / endpoint 的 `detour`（Dial Fields） | <https://sing-box.sagernet.org/configuration/shared/dial/> |
+| `links` / `base64` / `v2rayn` | **没有这个字段** | 会生成告警并忽略 `--chain` / `--chain-rear`（分享链接格式表达不了链路） |
+| `clash` + `--clash-legacy` | 原版 Clash 没有 `dialer-proxy` | 同上，告警并忽略 |
+
+链路跳点**不会**进负载均衡与分组：xray 的 `observatory.subjectSelector`、mihomo 的 `proxy-groups`、
+sing-box 的 `selector` / `urltest` 里都只有落地节点 —— 否则「自动选择」会去测一条本来只是入口的线路。
+引用了订阅节点的跳点是个例外，它本身仍是可选节点，但它走的是自己那一跳（不会出现「A 通过 A 出去」）。
+
+**必须知道的几条边界**（都是实测/官方文档确定的）：
+
+- **链路是按 TCP 建的隧道**。凡是**经隧道被拨到**的那一跳，其传输依赖 UDP 时链不通：
+  `hysteria` / `hysteria2` / `tuic` / `wireguard`，以及 `quic` / `kcp` 传输的节点。
+  也就是「前置链路下的**节点**」和「**后置链路的每一跳**」。判据是 `protocol_is_udp_transport()`，
+  链位检查是 `chain_tunnel_blocker()`；mihomo 官方文档对 `dialer-proxy` 也写了同样的注意事项
+  （「请勿选择任何 udp 类协议如 hy2/tuic/wg」）。
+
+  处理方式分两种 —— 因为「丢一跳」和「丢一个候选」的代价完全不同：
+  * **跳点**（用户点名的链路基础设施）链位非法 → **转换失败并说明原因**，绝不静默拆链；
+  * **订阅节点**（只是候选）被前置链路隧道承载、但协议是 UDP → **跳过该节点并说明原因**。
+    丢掉一个候选不会让流量按真实 IP 出去，所以不必拖着整份转换一起失败。
+
+  于是 UDP 协议只允许待在**最外层**那一跳（`chain[0]`，直连、不经隧道）；后置链路的每一跳
+  按定义都要经隧道，必须全是 TCP 传输。注意**只给后置链路时订阅节点并不被隧道承载**，
+  所以满是 hysteria2 / tuic 的订阅在那里照样能转换。
+- **目标内核表达不了某个跳点时会给出可操作提示**（`target_capability_hint()`）：例如
+  hysteria2 跳点在 `-t xray` 下会直接告诉你「改用 -t clash 或 -t singbox」，而不是只说一句不支持。
+- **链路是显式指定的基础设施，写不出来就报错**：链接非法、名字不存在、同一个节点在链路里出现两次
+  （会成自环）、或者某个跳点这个目标表达不了 —— 这几种情况一律**转换失败并说明原因**，
+  而不是退化成直连。静默直连会让流量直接按真实 IP 出去，是这个功能最不能出的错。
+- **输入里已有的链路会被保真再输出**：Xray 配置的 `sockopt.dialerProxy`、mihomo 的 `dialer-proxy`
+  现在会解析进模型，转 `xray` / `clash` / `singbox` 时按各内核的字段还原（引用靠出站 tag /
+  代理名反查，节点改名、去重、加 emoji 都不会断）。引用的出站不在本次输出里时，
+  会**明确告警**「已按直连处理」而不是装作无事发生。
+- **同名不同节点造成的歧义引用会被拒绝，而不是猜一个**：输入里若两条不同出站用了同一个
+  `tag` / 代理名，指向该名字的引用根本无法确定指谁 —— 会告警并按直连处理，绝不按订阅顺序赌一个
+  （那会把流量静默指向错误的线路）。
+- `--chain` / `--chain-rear` 与输入自带的 `dialerProxy` 同时存在时，**显式给的链路覆盖**后者
+  （并告警说明）。
+- mihomo 的 `dialer-proxy` **列表形态**（`dialer-proxy: [a, b]`）没有权威文档说明方向，
+  本工具只解析字符串形态，列表形态忽略并告警 —— 宁可不猜，也不产出「看起来链上了其实没链」的配置。
+
+`clash` 目标加 `--clash-legacy`（原版 Clash）时没有 `dialer-proxy` 字段，链路会被忽略并告警。
+
+Web UI 的「高级选项 → 链式代理」是一个多行输入框（一行一项、**上面的在前**），`/sub` 用
+重复的 `chain=` 参数或 `chain=a|b` 写法，`POST /api/convert` 用 `options.chain` 数组/字符串。
+
+**怎么验的**：`tools/validate.ps1` 现在支持 `-Chain`，可以直接拿真实内核校验带链路的产物
+（多跳用逗号数组或 `|` 分隔 —— PowerShell 不允许同一个参数写两遍）：
+
+```powershell
+.\tools\validate.ps1 -Source tests\fixtures\all_protocols.txt -Target xray -Chain "socks5://10.0.0.1:1080"
+.\tools\validate.ps1 -Source tests\fixtures\all_protocols.txt -Target clash -Chain "socks5://10.0.0.1:1080|@中转"
+```
+
+除此之外还做过一轮**端到端**验证（三个内核各一遍）：本地目标服务器 + 两个 Python SOCKS5 分别当前置与
+节点，生成的配置里「节点」就是那个出口 SOCKS5。断言有三条 —— 经链路取到正文、前置节点被要求去连
+**出口节点**、而前置自己**没有**直接去连目标；再加上一条反证：不给 `--chain` 时前置一条连接都收不到。
+三个内核全部通过（sing-box 1.14 / Xray 26.9 / mihomo 1.19）。
+
+调研笔记（官方文档出处、未验证项）在 [`docs/proxy-chain.md`](docs/proxy-chain.md)。
 
 ## DNS（`dns.nameserver`）与 IPv6
 
@@ -967,7 +1120,8 @@ v2rayNG 订阅 / v2rayNG 完整），勾选项（emoji、UDP、去重、rules、
 **探测证书指纹**、原版 Clash 语法），
 配置代理 / UA / 超时 / 重试，转换后直接复制或下载；界面还会给出可填进客户端的 `/sub` 地址，
 并在链接类目标下显示「链接 N 条」。勾上「输出 rules」会展开**分流规则集复选**，「高级选项」里
-还有 **DNS 复选 + 自定义地址**，这些选择都会记在浏览器里、也会写进生成的 `/sub` 链接。
+还有 **DNS 复选 + 自定义地址**与**链式代理输入框**，这些选择都会记在浏览器里、也会写进生成的
+`/sub` 链接。
 选「v2rayNG 订阅」时，把生成的那个 `/sub?target=base64&url=…` 地址填进 v2rayNG 的「订阅设置」
 就能自动更新。
 
@@ -1001,6 +1155,7 @@ HTTP 接口是 subconverter 的兼容子集：
 | `filename` | 订阅名，用于下载文件名与配置首行注释 |
 | `emoji` `udp` `tfo` `sort` `dedup` `rules` `clash_legacy`(=`legacy`) `ipv6` `probe_cert` | 布尔开关，**键出现即覆盖默认值**，写 `=false` 可关闭 |
 | `probe_cert_timeout` | `probe_cert` 的单节点探测超时（秒），默认 5 |
+| `chain` | 链式代理的一跳，**可重复出现**（顺序即「最外侧 → 最内侧」），也可用 `\|` 分隔多项；值与 `--chain` 相同（分享链接或 `@节点名`）。见「[链式代理](#链式代理前置--中转)」 |
 | `rulesets` `dns` | 逗号分隔列表，见下表 |
 | `proxy` `ua` `timeout` `retries` | 抓取参数 |
 | `insecure` | 跳过 TLS 证书校验 |

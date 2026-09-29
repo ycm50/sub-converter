@@ -221,6 +221,7 @@ add_library(subconv_core STATIC
   src/emit/xhttp.cpp
   src/emit/rulesets.cpp
   src/emit/dns.cpp
+  src/emit/chain.cpp
   src/emit/emit.cpp
   src/server/convert.cpp
   src/server/request.cpp

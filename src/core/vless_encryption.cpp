@@ -126,6 +126,21 @@ VlessEncryption parse_vless_encryption(std::string_view value) {
     }
   }
 
+  // 认证参数（最后一块）是客户端要用的公钥包。mihomo 的 encryption.NewClient 会把它 base64
+  // 解出来按长度分派：32 字节当 X25519 公钥，否则当 ML-KEM-768 封装密钥；解不出来就直接报
+  // `failed to use encryption: …`，并让**整份配置加载失败**（本地实测确认）。
+  // 这里做最保守的判断：解不开、或解出来的字节数连一个 X25519 公钥（32 字节）都不够，
+  // 那几乎必然是被中间层截断了 —— 那可不是「连上没数据」，而是内核根本起不来。
+  if (info.problem.empty() && !info.key.empty()) {
+    const auto decoded = codec::base64_decode(info.key);
+    if (!decoded) {
+      bad("最后的认证参数不是合法的 base64（内核会直接拒绝加载这份配置）");
+    } else if (decoded->size() < 32) {
+      bad("最后的认证参数只解出 " + std::to_string(decoded->size()) +
+          " 字节，不足一个 X25519 公钥（32 字节）—— 像是被截断了，内核会直接拒绝加载这份配置");
+    }
+  }
+
   return info;
 }
 

@@ -2,6 +2,8 @@
 //
 // 能力边界：支持 ss / vmess / vless / trojan / hysteria / hysteria2 / tuic / socks / http；
 // 不支持 ssr / snell（sing-box 已移除，交给 mihomo）。
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -64,7 +66,7 @@ Json build_transport(const ProxyNode& n) {
     case Network::Ws: {
       Json ws = Json::object();
       ws["type"] = "ws";
-      ws["path"] = n.ws.path.empty() ? "/" : n.ws.path;
+      ws["path"] = normalize_transport_path(n.ws.path);
       Json headers = Json::object();
       if (!n.ws.host.empty()) headers["Host"] = n.ws.host;
       for (const auto& [k, v] : n.ws.headers) headers[k] = v;
@@ -114,7 +116,11 @@ bool build_ss_plugin(const ProxyNode& n, std::string& plugin, std::string& opts)
   return false;   // 未知插件：sing-box 无法表达
 }
 
-Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
+/// 返回 Null 表示该协议 sing-box 不支持（已记录 warning）。
+/// dialer 非空时写 Dial Fields 的 `detour`：本条出站的底层连接交给那条出站去建（链式代理）。
+/// 文档：https://sing-box.sagernet.org/configuration/shared/dial/
+Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings,
+                    const std::string& dialer = {}) {
   auto reject = [&](std::string why) {
     warnings.push_back(std::string("跳过节点 ") + n.name + "（" + to_string(n.protocol) +
                        "）：sing-box " + why);
@@ -132,6 +138,7 @@ Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
 
   Json out = Json::object();
   out["tag"] = n.name;
+  if (!dialer.empty()) out["detour"] = dialer;
 
   switch (n.protocol) {
     case Protocol::Shadowsocks: {
@@ -263,7 +270,9 @@ Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
 /// 旧的 `LegacyWireGuardOutboundOptions`（server / server_port / local_address / peer_public_key）
 /// 仍被兼容，但既然要产出新配置就用新形态 —— 老形态在后续版本里会消失。
 /// 返回 Null 表示该节点无法转换（已记录原因）。
-Json build_wireguard_endpoint(const ProxyNode& n, std::vector<std::string>& warnings) {
+/// dialer 非空时写 Dial Fields 的 `detour`（endpoint 同样是 dial-capable 的）。
+Json build_wireguard_endpoint(const ProxyNode& n, std::vector<std::string>& warnings,
+                              const std::string& dialer = {}) {
   auto reject = [&](const std::string& why) {
     warnings.push_back("跳过节点 " + n.name + "（wireguard）：sing-box " + why);
     return Json();
@@ -276,6 +285,7 @@ Json build_wireguard_endpoint(const ProxyNode& n, std::vector<std::string>& warn
   Json endpoint = Json::object();
   endpoint["type"] = "wireguard";
   endpoint["tag"] = n.name;
+  if (!dialer.empty()) endpoint["detour"] = dialer;
 
   // address 是本地网卡地址（CIDR）。裸 IP 要补全掩码：WireGuard 的 Address 允许
   // 不带前缀，但 sing-box 解析的是 netip.Prefix，只认 "10.0.0.2/32" 这种写法。
@@ -336,17 +346,133 @@ Result<std::string> emit_singbox(const NodeList& nodes, const EmitOptions& opts,
   const NodeList prepared = prepare_nodes(nodes, opts);
   if (prepared.empty()) return fail("去重后没有可输出的节点");
 
+  // 链式代理：链路是用户显式指定的基础设施，任何一跳写不出来就直接报错 ——
+  // 静默降级成直连会把流量按真实 IP 放出去。
+  auto plan = resolve_chain(prepared, opts, warnings);
+  if (!plan) return fail(plan.error());
+  const std::map<std::string, std::string> ref_index = build_dialer_index(prepared);
+  // 输入自带引用成环时先拦下来：内核不一定拒绝这种配置，真连上去才会死循环 / 超时。
+  if (!plan->active()) {
+    if (const auto cycle = dialer_cycle(prepared, ref_index); !cycle.empty()) {
+      return fail("输入配置的链式代理成环：" + codec::join(cycle, " -> ") +
+                  "（detour 首尾相接会死循环，无法转换）");
+    }
+  }
+
   std::vector<std::string> skipped;
+  Json hop_outbounds = Json::array();
+  Json hop_endpoints = Json::array();
   Json node_outbounds = Json::array();
   Json node_endpoints = Json::array();
   Json node_tags = Json::array();
+  std::set<std::string> hop_names;
+
+  // 外部链路跳点排在最前，读起来就是「本地 → 跳1 → 跳2 → … → 每个节点」。
+  // 引用订阅节点的跳点不重复产出，直接复用节点自己那条出站 / endpoint。
+  for (const auto& hop : plan->hops) {
+    hop_names.insert(hop.tag);
+    // 带 dialer 的跳点要经上一条出站的 TCP 隧道到达，UDP 传输的协议到不了。
+    // 这是用户显式指定的基础设施 —— 直接报错，绝不静默丢掉。
+    // 要在 `continue` 之前判：引用订阅节点的跳点不在这里产出出站，但 dialer 照样会写。
+    if (!hop.dialer.empty()) {
+      const std::string blocker = chain_tunnel_blocker(hop.node);
+      if (!blocker.empty()) {
+        return fail("链路节点 " + hop.node.name + " 不能作为链路中间跳点：" + blocker);
+      }
+    }
+    if (!hop.extra) continue;
+    std::vector<std::string> hop_warnings;
+    Json out = hop.node.protocol == Protocol::WireGuard
+                   ? build_wireguard_endpoint(hop.node, hop_warnings, hop.dialer)
+                   : build_outbound(hop.node, hop_warnings, hop.dialer);
+    if (out.is_null()) {
+      return fail("链路节点 " + hop.node.name + " 无法写进 sing-box 配置：" +
+                  (hop_warnings.empty() ? std::string("不支持该协议")
+                                        : codec::join(hop_warnings, "；")) +
+                  target_capability_hint(hop.node, "singbox"));
+    }
+    // 产出成功时也可能带告警（例如 wireguard endpoint 的 dns/remote-dns-resolve 提示），
+    // 必须在成功分支一并收下，否则用户永远看不到这条提示。
+    for (auto& w : hop_warnings) skipped.push_back(std::move(w));
+    if (hop.node.protocol == Protocol::WireGuard) {
+      hop_endpoints.push_back(std::move(out));
+    } else {
+      hop_outbounds.push_back(std::move(out));
+    }
+  }
+
   for (const auto& node : prepared) {
+    const std::string dialer = effective_dialer(node, *plan, ref_index, warnings);
+    // 有后置链路时，这个节点自己变成链路里的中间跳点，流量落点是后置链路的末端
+    // （末端出站的名字里带着「节点 → 后置」，进 selector / urltest 的是它）。
+    const RearChain* rear = plan->rear_for(node.name);
+
+    // 前置链路会把「每个节点」都变成要经 TCP 隧道到达的一跳，UDP 传输的协议到不了。
+    // 候选节点按「被跳过」处理（丢掉候选不会让流量按真实 IP 出去）；被链路点名的节点
+    // 是用户的基础设施，不能丢 —— 直接报错。
+    if (!dialer.empty()) {
+      const std::string blocker = chain_tunnel_blocker(node);
+      if (!blocker.empty()) {
+        if (hop_names.count(node.name) != 0) {
+          return fail("链路节点 " + node.name + " 不能作为链路中间跳点：" + blocker);
+        }
+        skipped.push_back("跳过节点 " + node.name + "：" + blocker +
+                          "（前置链路要求每个节点都经 TCP 隧道到达）");
+        continue;
+      }
+    }
+
     // wireguard 是 endpoint，其余是 outbound；两者都会进 selector / urltest 的候选。
+    std::vector<std::string> node_warnings;
     Json out = node.protocol == Protocol::WireGuard
-                   ? build_wireguard_endpoint(node, skipped)
-                   : build_outbound(node, skipped);
-    if (out.is_null()) continue;
-    node_tags.push_back(node.name);
+                   ? build_wireguard_endpoint(node, node_warnings, dialer)
+                   : build_outbound(node, node_warnings, dialer);
+    if (out.is_null()) {
+      if (rear != nullptr || hop_names.count(node.name) != 0) {
+        return fail("链路节点 " + node.name + " 无法写进 sing-box 配置：" +
+                    (node_warnings.empty() ? std::string("不支持该协议")
+                                           : codec::join(node_warnings, "；")) +
+                    "（链路是显式指定的，不能静默降级成直连）" +
+                    target_capability_hint(node, "singbox"));
+      }
+      for (auto& w : node_warnings) skipped.push_back(std::move(w));
+      continue;
+    }
+    // 成功产出时也可能带告警（wireguard endpoint 的 dns/remote-dns-resolve 提示），
+    // 必须一并收下 —— 只在失败分支收会让这类提示永远消失。
+    for (auto& w : node_warnings) skipped.push_back(std::move(w));
+
+    if (rear != nullptr) {
+      // 后置链路：逐跳产出，hops.back() 才是流量落点。
+      // 每一跳都是经上一跳的 TCP 隧道到达的，所以每一跳都要过 UDP 兼容性检查。
+      for (const auto& hop : rear->hops) {
+        const std::string blocker = chain_tunnel_blocker(hop.node);
+        if (!blocker.empty()) {
+          return fail("后置链路节点 " + hop.node.name + " 不能作为链路中间跳点：" + blocker);
+        }
+        std::vector<std::string> hop_warnings;
+        Json hout = hop.node.protocol == Protocol::WireGuard
+                        ? build_wireguard_endpoint(hop.node, hop_warnings, hop.dialer)
+                        : build_outbound(hop.node, hop_warnings, hop.dialer);
+        if (hout.is_null()) {
+          return fail("后置链路节点 " + hop.node.name + " 无法写进 sing-box 配置：" +
+                      (hop_warnings.empty() ? std::string("不支持该协议")
+                                            : codec::join(hop_warnings, "；")) +
+                      "（链路是显式指定的，不能静默降级成直连）" +
+                      target_capability_hint(hop.node, "singbox"));
+        }
+        for (auto& w : hop_warnings) skipped.push_back(std::move(w));
+        // 链路跳点不进 selector / urltest，与前置链路跳点的处置保持一致。
+        if (hop.node.protocol == Protocol::WireGuard) {
+          hop_endpoints.push_back(std::move(hout));
+        } else {
+          hop_outbounds.push_back(std::move(hout));
+        }
+      }
+      node_tags.push_back(rear->target());
+    } else {
+      node_tags.push_back(node.name);
+    }
     if (node.protocol == Protocol::WireGuard) {
       node_endpoints.push_back(std::move(out));
     } else {
@@ -383,6 +509,8 @@ Result<std::string> emit_singbox(const NodeList& nodes, const EmitOptions& opts,
                            {"interval", "5m"},
                            {"tolerance", 50},
                            {"interrupt_exist_connections", false}});
+  // 链路跳点排在节点前面：sing-box 不要求声明顺序，但这样读起来就是链路的顺序。
+  for (auto& out : hop_outbounds) outbounds.push_back(std::move(out));
   for (auto& out : node_outbounds) outbounds.push_back(std::move(out));
   outbounds.push_back(Json{{"type", "direct"}, {"tag", "direct"}});
   outbounds.push_back(Json{{"type", "block"}, {"tag", "block"}});
@@ -393,8 +521,12 @@ Result<std::string> emit_singbox(const NodeList& nodes, const EmitOptions& opts,
                                          {"tag", "mixed-in"},
                                          {"listen", "127.0.0.1"},
                                          {"listen_port", 2080}}});
-  // endpoints 必须排在 outbounds 之前（sing-box 要求先声明 endpoint 再引用）。
-  if (!node_endpoints.empty()) config["endpoints"] = std::move(node_endpoints);
+  // endpoints 必须排在 outbounds 之前（sing-box 要求先声明 endpoint 再引用）；
+  // 链路跳点排在节点前面（节点要用 detour 指向它），所以这里显式拼一遍顺序。
+  Json endpoints = Json::array();
+  for (auto& ep : hop_endpoints) endpoints.push_back(std::move(ep));
+  for (auto& ep : node_endpoints) endpoints.push_back(std::move(ep));
+  if (!endpoints.empty()) config["endpoints"] = std::move(endpoints);
   config["outbounds"] = std::move(outbounds);
   config["route"] = Json{{"final", g_select}, {"auto_detect_interface", true}};
 

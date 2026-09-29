@@ -62,19 +62,14 @@ std::optional<Protocol> protocol_from_string(std::string_view s) noexcept {
   return std::nullopt;
 }
 
-bool protocol_is_dialer(Protocol p) noexcept {
+bool protocol_is_udp_transport(Protocol p) noexcept {
+  // 只有这四种「客户端直接对本机服务端发 UDP」的协议：hysteria / hysteria2 走 QUIC，
+  // tuic 走 QUIC，wireguard 走它自己的 UDP 隧道。其余协议（含 ss / vmess / vless /
+  // trojan / snell / socks5 / http）都是 TCP（或可跑在 TCP 之上），能被隧道承载。
   switch (p) {
-    case Protocol::Socks5:
-    case Protocol::Http:
-    case Protocol::Shadowsocks:
-    case Protocol::ShadowsocksR:
-    case Protocol::Vmess:
-    case Protocol::Vless:
-    case Protocol::Trojan:
     case Protocol::Hysteria:
     case Protocol::Hysteria2:
     case Protocol::Tuic:
-    case Protocol::Snell:
     case Protocol::WireGuard:
       return true;
     default:
