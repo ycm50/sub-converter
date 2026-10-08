@@ -665,7 +665,8 @@ Result<std::string> emit_clash(const NodeList& nodes, const EmitOptions& opts,
   // --- rules ---
   Yaml rules = Yaml::sequence();
   if (opts.include_rules) {
-    for (const auto& line : build_clash_rules(opts.rule_sets, g_final, warnings)) {
+    for (const auto& line :
+         build_clash_rules(opts.rule_sets, g_final, opts.custom_rule_sets, warnings)) {
       rules.push(Yaml::scalar(line));
     }
   }

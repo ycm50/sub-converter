@@ -157,11 +157,13 @@ Result<std::string> emit_sharelinks(const NodeList& nodes, const EmitOptions& op
 // --- 分流规则集（见 src/emit/rulesets.cpp）---
 
 /// 按选中的规则集拼出 clash 的 `rules:` 列表（含最后的 `MATCH,<final_group>`）。
-/// REJECT 类规则永远排在 DIRECT 类之前；顺序即匹配优先级（clash 首个命中生效）。
-/// warnings 非空时记录无法识别的规则集 id。
+///
+/// 顺序 = 界面上表格的顺序：**自定义规则在前**（按传入顺序，即表内从上到下），
+/// 随后是内置规则集展开的规则（按目录顺序）。刻意不按 policy 重排 ——
+/// 那样产物会和界面显示的顺序对不上，用户改顺序却看不到变化。
 [[nodiscard]] std::vector<std::string> build_clash_rules(
     const std::vector<std::string>& selected, const std::string& final_group,
-    std::vector<std::string>* warnings);
+    const std::vector<CustomRuleSet>& custom, std::vector<std::string>* warnings);
 
 // --- DNS 预设（见 src/emit/dns.cpp）---
 

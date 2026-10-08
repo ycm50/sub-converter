@@ -368,10 +368,29 @@ HttpResponse handle(const HttpRequest& req, const ServerOptions& opts) {
       item["name"] = rs.name;
       item["policy"] = rs.policy;
       item["note"] = rs.note;
+      item["custom"] = rs.custom;
+      // 展开后的规则行：Web UI 把它们平铺成一张规则表（界面不自己拼规则）
+      item["rules"] = rs.rules;
       list.push_back(std::move(item));
     }
     payload["rulesets"] = std::move(list);
     payload["default"] = default_rule_sets();
+    // 一并说明自定义规则集怎么写，Web UI 的「自定义规则集」编辑区直接展示这段提示
+    payload["custom_hint"] =
+        "填写 JSON：{\"我的规则\":{\"policy\":\"REJECT\",\"rules\":"
+        "[{\"type\":\"DOMAIN-KEYWORD\",\"value\":\"ads\"},"
+        "{\"type\":\"DOMAIN-SUFFIX\",\"value\":\"example.com\"}]}}";
+    // 规则类型下拉：value 是内核认的字面类型名，label 是中文对照。
+    // 列表放在这里作为**唯一真源**，Web UI 不再自己写死一份。
+    Json known = Json::array();
+    for (const auto& type : rule_type_catalogue()) {
+      Json item = Json::object();
+      item["value"] = type.value;
+      item["label"] = type.label;
+      item["note"] = type.note;
+      known.push_back(std::move(item));
+    }
+    payload["rule_types"] = std::move(known);
     return json_response(200, payload);
   }
   if (req.path == "/api/dns" || req.path == "/dns") {

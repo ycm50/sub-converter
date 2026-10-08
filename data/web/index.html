@@ -106,6 +106,9 @@
   .rulesets[hidden] { display: none; }
   .rulesets-head { font-size: 12px; color: var(--muted); margin-bottom: 9px; }
   .rulesets-head b { color: var(--text); font-size: 13px; font-weight: 600; }
+  .rulesets-head-sub { margin-top: 13px; padding-top: 11px; border-top: 1px solid var(--border); }
+  /* 规则块在「高级选项」外面，给它一点与上面的间距 */
+  #rulesets { margin-top: 14px; }
   .rulesets-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(184px, 1fr)); gap: 8px 14px; }
   .ruleset { display: flex; align-items: center; gap: 7px; font-size: 13px; cursor: pointer; }
   .ruleset input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
@@ -118,6 +121,86 @@
   .ruleset .tag[data-region="国外"] { color: var(--ok); }
   .ruleset .tag[data-region="国内"] { color: var(--warn); }
   .dns-custom { margin-top: 10px; }
+
+  /* 分流规则表：添加区 + 表格 + 选中后出现的删除按钮 */
+  .rule-add { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 6px; }
+  .rule-add select, .rule-add input {
+    font: 12.5px/1.4 inherit; padding: 6px 8px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+  }
+  .rule-add select { flex: 0 1 150px; }
+  .rule-add input { flex: 1 1 200px; min-width: 0; }
+  .rule-add button {
+    font: 12.5px/1 inherit; padding: 7px 13px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--accent); background: transparent; color: var(--accent);
+  }
+  .rule-add button:hover { background: var(--accent); color: var(--bg); }
+  .rule-add-hint { font-size: 11.5px; color: var(--muted); margin-bottom: 9px; }
+  .rule-add-hint b { color: var(--text); }
+  .rule-table-wrap { max-height: 300px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .rule-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .rule-table th {
+    text-align: left; font-weight: 600; color: var(--muted); font-size: 11px;
+    padding: 6px 9px; border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; background: var(--panel); z-index: 1;
+  }
+  .rule-table td {
+    padding: 5px 9px; border-bottom: 1px solid var(--border);
+    font-family: var(--mono); font-size: 11.5px; word-break: break-all;
+  }
+  .rule-table tbody tr { cursor: pointer; }
+  .rule-table tbody tr:hover { background: var(--bg); }
+  .rule-table tbody tr.selected { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+  .rule-table tbody tr.selected td { color: var(--text); }
+  /* 类型列要放得下「中文对照 + 原类型名」，别让它折行 */
+  .rule-table .col-type { width: 232px; }
+  .rule-table .col-policy { width: 110px; }
+  .rule-table .col-src { width: 76px; }
+  .rule-table td:first-child { white-space: nowrap; }
+  .rule-src {
+    font: 10px/1 var(--mono); padding: 3px 5px; border-radius: 4px;
+    border: 1px solid var(--border); color: var(--muted);
+  }
+  /* 类型列里的原类型名：弱化显示，不抢中文对照的视觉重心 */
+  .rule-type-raw {
+    font: 10.5px/1 var(--mono); color: var(--muted);
+    margin-left: 6px; padding: 2px 4px; border-radius: 3px;
+    border: 1px solid var(--border);
+  }
+  .rule-src[data-custom="1"] { color: var(--accent); border-color: var(--accent); }
+  .rule-table-empty { padding: 14px; text-align: center; color: var(--muted); font-size: 12px; }
+  .rule-actions {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    margin-top: 9px; flex-wrap: wrap;
+  }
+  .rule-actions[hidden] { display: none; }
+  .rule-actions-info { font-size: 11.5px; color: var(--muted); font-family: var(--mono); word-break: break-all; }
+  .rule-actions button {
+    font: 12.5px/1 inherit; padding: 7px 13px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--err); background: transparent; color: var(--err);
+  }
+  .rule-actions button:hover { background: var(--err); color: var(--bg); }
+
+  /* 高级 JSON 编辑 */
+  .custom-rs { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+  .custom-rs > summary { font-size: 12.5px; color: var(--accent); cursor: pointer; user-select: none; }
+  .custom-rs-body { margin-top: 10px; display: flex; flex-direction: column; gap: 10px; }
+  .custom-rs-hint { font-size: 11.5px; color: var(--muted); line-height: 1.65; }
+  .custom-rs-hint code {
+    font-family: var(--mono); font-size: 11px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px;
+  }
+  .custom-rs-raw textarea {
+    width: 100%; font-family: var(--mono); font-size: 11.5px; line-height: 1.5;
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 7px; padding: 7px 8px; resize: vertical;
+  }
+  .custom-rs-error {
+    font-size: 12px; color: var(--err); border: 1px solid var(--err);
+    border-radius: 7px; padding: 7px 9px; white-space: pre-wrap; word-break: break-word;
+    margin-top: 9px;
+  }
+  .custom-rs-error[hidden] { display: none; }
   button {
     font: inherit; cursor: pointer; border-radius: 9px; padding: 9px 14px;
     border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
@@ -231,15 +314,6 @@
           <label class="opt" title="连接每个节点取对端证书 SHA256 指纹。Xray 25+ 移除了 allowInsecure，机场那种「证书与 SNI 对不上」的节点只能靠指纹放行，否则客户端里全是 -1"><input type="checkbox" id="opt-probecert">探测证书指纹</label>
           <label class="opt"><input type="checkbox" id="opt-legacy">原版 Clash 语法</label>
         </div>
-        <!-- 勾上「输出 rules」才出现：可选分流规则集。
-             列表由 GET /api/rulesets 提供（C++ 侧是唯一真源，避免两边写死不同步）。 -->
-        <div class="rulesets" id="rulesets" hidden>
-          <div class="rulesets-head">
-            <b>分流规则集</b> · 勾中即展开成 rules；拒绝类优先于直连类，其余按顺序匹配。
-            目前只对 <b>Clash / mihomo</b> 目标生效。
-          </div>
-          <div class="rulesets-list" id="rulesets-list"></div>
-        </div>
 
         <!-- DNS：写进 clash 的 dns.nameserver；列表同样来自后端（GET /api/dns） -->
         <div class="rulesets" id="dnsblock">
@@ -302,6 +376,71 @@
       </div>
     </details>
 
+    <!-- 分流规则表：刻意放在「高级选项」**外面**，默认就能看到 ——
+         它是要天天改的东西，藏进折叠区等于没有。
+         内置规则集的勾选列表由 GET /api/rulesets 提供（唯一真源）；
+         勾中的规则集会展开成表格里的「内置」行；
+         用户添加的规则排在内置规则**上方**，提交时走 options.custom_rulesets。 -->
+    <div class="rulesets" id="rulesets" hidden>
+      <div class="rulesets-head">
+        <b>内置规则集</b> · 勾中即把它的规则展开到下面的表里（按目录顺序）。
+        目前只对 <b>Clash / mihomo</b> 目标生效。
+      </div>
+      <div class="rulesets-list" id="rulesets-list"></div>
+
+      <div class="rulesets-head rulesets-head-sub">
+        <b>规则表</b> · 按表内顺序匹配；点某一行选中后可删除（内置行只读）。
+      </div>
+
+      <!-- 添加区：选类型 + 填值 + 回车入表 -->
+      <div class="rule-add">
+        <select id="rule-add-type" title="规则类型"></select>
+        <input id="rule-add-value" type="text" placeholder="填入域名或关键字，回车添加" spellcheck="false">
+        <select id="rule-add-policy" title="该规则的处置"></select>
+        <button type="button" id="rule-add-btn">添加</button>
+      </div>
+      <div class="rule-add-hint" id="rule-add-hint">
+        按 <b>回车</b> 即可加入表格；新规则排在最上方。
+      </div>
+
+      <!-- 规则表：自定义规则在上，内置规则在下 -->
+      <div class="rule-table-wrap">
+        <table class="rule-table">
+          <thead>
+            <tr>
+              <th class="col-type">类型</th>
+              <th class="col-value">值</th>
+              <th class="col-policy">处置</th>
+              <th class="col-src">来源</th>
+            </tr>
+          </thead>
+          <tbody id="rule-table-body"></tbody>
+        </table>
+      </div>
+
+      <!-- 选中某行后才出现：删除按钮 -->
+      <div class="rule-actions" id="rule-actions" hidden>
+        <span class="rule-actions-info" id="rule-actions-info"></span>
+        <button type="button" id="rule-delete-btn">删除选中规则</button>
+      </div>
+
+      <div class="custom-rs-error" id="custom-rs-error" hidden></div>
+
+      <details class="custom-rs" id="custom-rs">
+        <summary>高级：直接编辑 JSON</summary>
+        <div class="custom-rs-body">
+          <div class="custom-rs-hint">
+            上面的表格会自动同步到这里；也可以直接改 JSON（失焦后回填表格）。
+            <code>policy</code> 可填 <code>DIRECT</code> / <code>REJECT</code> 或代理组名。
+          </div>
+          <label class="field custom-rs-raw">
+            <textarea id="custom-rs-json" rows="6" spellcheck="false"
+              placeholder='{"my-rule":{"policy":"REJECT","rules":[{"type":"DOMAIN-KEYWORD","value":"ads"}]}}'></textarea>
+          </label>
+        </div>
+      </details>
+    </div>
+
     <button class="primary" id="run" type="button">转换<kbd>Ctrl</kbd><kbd>Enter</kbd></button>
   </section>
 
@@ -352,7 +491,6 @@
   }
 
   // ---- 分流规则集：列表来自 /api/rulesets -------------------------------------
-  var RULESET_IDS = null;       // null = 目录还没拿到 → 不下发 rulesets，用服务端默认
 
   // 链接里的 ?rulesets= / ?dns= 必须在目录渲染**之前**就解析好；空串 [] 表示「一个都不要」，
   // 所以不能和「没指定」共用 null/空值的真值判断。
@@ -366,22 +504,364 @@
   var rulesetPreset = queryList("rulesets");
   var dnsPreset = queryList("dns");
 
-  function rulesetBoxes() {
-    return Array.prototype.slice.call(
-      document.querySelectorAll("#rulesets-list input[data-ruleset]"));
+  /** 规则表模型：每一行 = 一条规则。
+   *  内置行来自 /api/rulesets 的展开结果（只读，不可删）；自定义行由用户添加，
+   *  在表内**排在内置行上方**，提交时汇总成 options.custom_rulesets。 */
+  var RULESET_IDS = null;        // null = 目录还没拿到 → 不下发 rulesets，用服务端默认
+  var BUILTIN_ROWS = [];         // { type, value, policy, setId }
+  var CUSTOM_ROWS = [];          // { type, value, policy }
+  var SELECTED_ROW = null;       // <tr> 元素，或 null
+  // 规则类型：{ value: 写进配置的字面名, label: 中文对照, note: 例子 }。
+  // 这里只是**离线兜底**；正常走 /api/rulesets 的 rule_types（C++ 侧唯一真源）。
+  var RULE_TYPES = [
+    { value: "DOMAIN", label: "精确域名" },
+    { value: "DOMAIN-SUFFIX", label: "域名后缀" },
+    { value: "DOMAIN-KEYWORD", label: "域名关键字" },
+    { value: "DOMAIN-WILDCARD", label: "域名通配符" },
+    { value: "DOMAIN-REGEX", label: "域名正则" },
+    { value: "GEOSITE", label: "内置域名库" },
+    { value: "IP-CIDR", label: "IP 网段" },
+    { value: "IP-CIDR6", label: "IP 网段（v6 写法）" },
+    { value: "GEOIP", label: "IP 所属国家" },
+    { value: "DST-PORT", label: "目标端口" },
+    { value: "PROCESS-NAME", label: "进程名" },
+    { value: "NETWORK", label: "网络类型" }
+  ];
+
+  /** 类型名 → 中文对照（拿不到就原样显示）。 */
+  function ruleTypeLabel(value) {
+    for (var i = 0; i < RULE_TYPES.length; i++) {
+      if (RULE_TYPES[i].value === value) return RULE_TYPES[i].label;
+    }
+    return value;
   }
 
-  function selectedRuleSets() {
-    return rulesetBoxes().filter(function (box) { return box.checked; })
-      .map(function (box) { return box.getAttribute("data-ruleset"); });
+  /** 类型名 → 一句话说明（用作下拉项的 title）。 */
+  function ruleTypeNote(value) {
+    for (var i = 0; i < RULE_TYPES.length; i++) {
+      if (RULE_TYPES[i].value === value) return RULE_TYPES[i].note || "";
+    }
+    return "";
   }
+
+  var POLICY_CHOICES = ["REJECT", "DIRECT", "🚀 节点选择"];
+  // 自定义行汇总到这个规则集里。id 用 ASCII：Windows 命令行把非 ASCII 参数按 ANSI 传，
+  // 中文 id 从 CLI 走会变成非法 UTF-8；HTTP 通道没这个问题，但统一用 ASCII 更省事。
+  var CUSTOM_SET_ID = "custom-rules";
 
   function syncRulesetsVisibility() {
     $("rulesets").hidden = !$("opt-rules").checked || RULESET_IDS === null;
   }
 
+  /** 把 `TYPE,VALUE,POLICY[,no-resolve]` 拆成三段（值里不可能有逗号：C++ 侧已校验）。 */
+  function splitRuleLine(line) {
+    var parts = line.split(",");
+    if (parts.length < 2) return null;
+    return {
+      type: parts[0].trim(),
+      value: parts[1].trim(),
+      policy: (parts[2] || "").trim()
+    };
+  }
+
+  /** 填一个普通字符串下拉（policy）。 */
+  function fillSelect(select, values, selected) {
+    select.innerHTML = "";
+    values.forEach(function (value) {
+      var option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      if (value === selected) option.selected = true;
+      select.appendChild(option);
+    });
+    // 当前值不在候选里（例如自定义集用了代理组名）时，补一个选项免得显示错
+    if (selected && values.indexOf(selected) < 0) {
+      var extra = document.createElement("option");
+      extra.value = selected;
+      extra.textContent = selected;
+      extra.selected = true;
+      select.appendChild(extra);
+    }
+  }
+
+  /**
+   * 填规则类型下拉：选项显示「中文对照（原类型名）」，
+   * **option.value 始终是内核认的原始类型名** —— 写进配置的必须是它。
+   */
+  function fillRuleTypeSelect(select, types, selected) {
+    select.innerHTML = "";
+    types.forEach(function (item) {
+      var option = document.createElement("option");
+      option.value = item.value;
+      option.textContent = item.label ? (item.label + "（" + item.value + "）") : item.value;
+      if (item.note) option.title = item.note;
+      if (item.value === selected) option.selected = true;
+      select.appendChild(option);
+    });
+    // 手填的非常见类型：也要能显示出来，不能被下拉吃掉
+    var exists = types.some(function (t) { return t.value === selected; });
+    if (selected && !exists) {
+      var extra = document.createElement("option");
+      extra.value = selected;
+      extra.textContent = selected;
+      extra.selected = true;
+      select.appendChild(extra);
+    }
+  }
+
+  function renderRuleTable() {
+    var body = $("rule-table-body");
+    body.innerHTML = "";
+    SELECTED_ROW = null;
+    hideRuleActions();
+
+    var rows = CUSTOM_ROWS.map(function (r) {
+      return { type: r.type, value: r.value, policy: r.policy, custom: true };
+    }).concat(BUILTIN_ROWS.map(function (r) {
+      return { type: r.type, value: r.value, policy: r.policy, custom: false };
+    }));
+
+    if (!rows.length) {
+      var empty = document.createElement("tr");
+      var cell = document.createElement("td");
+      cell.colSpan = 4;
+      cell.className = "rule-table-empty";
+      cell.textContent = "还没有规则。用上面的输入框添加一条，或确认内置规则集已勾选。";
+      empty.appendChild(cell);
+      body.appendChild(empty);
+      return;
+    }
+
+    rows.forEach(function (row) {
+      var tr = document.createElement("tr");
+      tr.setAttribute("data-custom", row.custom ? "1" : "0");
+
+      // 类型列：中文对照为主，原类型名跟一个弱化的 code（产物里写的始终是原类型名）
+      var tdType = document.createElement("td");
+      var label = ruleTypeLabel(row.type);
+      if (label === row.type) {
+        tdType.textContent = row.type;
+      } else {
+        tdType.appendChild(document.createTextNode(label));
+        var code = document.createElement("span");
+        code.className = "rule-type-raw";
+        code.textContent = row.type;
+        tdType.appendChild(code);
+      }
+      tdType.title = ruleTypeNote(row.type) || row.type;
+
+      var tdValue = document.createElement("td");
+      tdValue.textContent = row.value;
+
+      var tdPolicy = document.createElement("td");
+      tdPolicy.textContent = row.policy;
+
+      var tdSrc = document.createElement("td");
+      var tag = document.createElement("span");
+      tag.className = "rule-src";
+      tag.setAttribute("data-custom", row.custom ? "1" : "0");
+      tag.textContent = row.custom ? "自定义" : "内置";
+      tdSrc.appendChild(tag);
+
+      tr.appendChild(tdType);
+      tr.appendChild(tdValue);
+      tr.appendChild(tdPolicy);
+      tr.appendChild(tdSrc);
+
+      tr.addEventListener("click", function () { selectRuleRow(tr); });
+      body.appendChild(tr);
+    });
+  }
+
+  function selectRuleRow(tr) {
+    if (SELECTED_ROW) SELECTED_ROW.classList.remove("selected");
+    SELECTED_ROW = tr;
+    tr.classList.add("selected");
+    var cells = tr.querySelectorAll("td");
+    $("rule-actions-info").textContent =
+      cells[0].textContent + " , " + cells[1].textContent + " , " + cells[2].textContent;
+    // 内置规则是只读的，不给删除按钮 —— 要改就取消勾选对应的规则集
+    var isCustom = tr.getAttribute("data-custom") === "1";
+    $("rule-delete-btn").disabled = !isCustom;
+    $("rule-delete-btn").title = isCustom ? "删除这条规则" : "内置规则不可删除（取消勾选对应规则集即可）";
+    $("rule-actions").hidden = false;
+  }
+
+  function hideRuleActions() {
+    $("rule-actions").hidden = true;
+    $("rule-actions-info").textContent = "";
+  }
+
+  function deleteSelectedRule() {
+    if (!SELECTED_ROW) return;
+    if (SELECTED_ROW.getAttribute("data-custom") !== "1") return;
+    // 表内顺序 = CUSTOM_ROWS 顺序 + BUILTIN_ROWS 顺序
+    var all = $("rule-table-body").querySelectorAll("tr");
+    var index = Array.prototype.indexOf.call(all, SELECTED_ROW);
+    if (index >= 0 && index < CUSTOM_ROWS.length) {
+      CUSTOM_ROWS.splice(index, 1);
+      syncCustomJson();
+      renderRuleTable();
+    }
+  }
+
+  function addRuleFromInputs() {
+    var type = $("rule-add-type").value;
+    var value = $("rule-add-value").value.trim();
+    var policy = $("rule-add-policy").value;
+    if (!value) {
+      showCustomError("请先填入规则的值（域名、后缀或关键字）。");
+      $("rule-add-value").focus();
+      return;
+    }
+    // 逗号会把 TYPE,VALUE,POLICY 切断，C++ 侧也会拒；这里尽早提示
+    if (value.indexOf(",") >= 0 || value.indexOf("\n") >= 0) {
+      showCustomError("值里不能有逗号或换行（会切断规则的三段式）。");
+      return;
+    }
+    showCustomError("");
+    // 新规则插在**自定义区最前面**（也就是整张表最上方）
+    CUSTOM_ROWS.unshift({ type: type, value: value, policy: policy });
+    $("rule-add-value").value = "";
+    $("rule-add-value").focus();
+    syncCustomJson();
+    renderRuleTable();
+  }
+
+  /** 表格 → 高级 JSON（保持两处一致，避免"改了没生效"）。 */
+  function syncCustomJson() {
+    if (!CUSTOM_ROWS.length) {
+      $("custom-rs-json").value = "";
+      return;
+    }
+    var grouped = {};
+    CUSTOM_ROWS.forEach(function (row) {
+      var key = row.policy;
+      if (!grouped[key]) grouped[key] = [];
+      grouped[key].push({ type: row.type, value: row.value });
+    });
+    var out = {};
+    Object.keys(grouped).forEach(function (policy, i) {
+      var id = i === 0 ? CUSTOM_SET_ID : CUSTOM_SET_ID + "-" + (i + 1);
+      out[id] = { policy: policy, rules: grouped[policy] };
+    });
+    $("custom-rs-json").value = JSON.stringify(out, null, 2);
+  }
+
+  /** 高级 JSON → 表格（失焦时回填）。 */
+  function parseCustomJson(text) {
+    if (!text || !text.trim()) return [];
+    var parsed = JSON.parse(text);
+    var sets = [];
+    function grab(id, item) {
+      var policy = (item && item.policy) || "DIRECT";
+      var rules = (item && item.rules) || [];
+      var single = typeof rules === "string" || (rules && !Array.isArray(rules));
+      (single ? [rules] : rules).forEach(function (rule) {
+        if (typeof rule === "string") {
+          var comma = rule.indexOf(",");
+          if (comma > 0) {
+            sets.push({ type: rule.slice(0, comma).trim(),
+              value: rule.slice(comma + 1).trim(), policy: policy });
+          }
+        } else if (rule && typeof rule === "object") {
+          sets.push({
+            type: rule.type || rule.rule_type || "DOMAIN-SUFFIX",
+            value: rule.value || rule.domain || rule.keyword || rule.payload || "",
+            policy: (rule.policy || policy)
+          });
+        }
+      });
+    }
+    if (Array.isArray(parsed)) {
+      parsed.forEach(function (item) { grab(item.id || "", item); });
+    } else if (parsed && typeof parsed === "object") {
+      Object.keys(parsed).forEach(function (key) { grab(key, parsed[key] || {}); });
+    }
+    return sets.filter(function (r) { return r.value; });
+  }
+
+  /** 取当前自定义规则（提交用）。返回 null 表示没有自定义规则。 */
+  function selectedCustomRuleSets() {
+    var text = $("custom-rs-json").value.trim();
+    if (!text) return null;
+    var parsed = JSON.parse(text);          // 语法错直接抛给调用方
+    if (!parsed || !Object.keys(parsed).length) return null;
+    return parsed;
+  }
+
+  function showCustomError(message) {
+    var box = $("custom-rs-error");
+    if (!message) {
+      box.hidden = true;
+      box.textContent = "";
+      return;
+    }
+    box.hidden = false;
+    box.textContent = message;
+  }
+
+  /** 拉取规则集目录 → 展开成内置规则行 + 恢复上次记忆的自定义规则。 */
+  function loadRulesets() {
+    return fetch("/api/rulesets")
+      .then(function (response) { return response.json(); })
+      .then(function (data) {
+        if (!data || !data.rulesets || !data.rulesets.length) return;
+        if (Array.isArray(data.rule_types) && data.rule_types.length) {
+          RULE_TYPES = data.rule_types;
+        }
+        fillRuleTypeSelect($("rule-add-type"), RULE_TYPES, "DOMAIN-SUFFIX");
+        fillSelect($("rule-add-policy"), POLICY_CHOICES, "REJECT");
+
+        RULESET_IDS = [];
+        var saved = null;
+        try {
+          var state = JSON.parse(localStorage.getItem("subconv.state") || "null");
+          if (state && Array.isArray(state.rulesets)) saved = state.rulesets;
+          if (state && state.customRulesets) {
+            $("custom-rs-json").value = state.customRulesets;
+            CUSTOM_ROWS = parseCustomJson(state.customRulesets);
+          }
+        } catch (e) { /* localStorage 不可用时忽略 */ }
+
+        var preset = rulesetPreset !== null ? rulesetPreset : (saved || data["default"] || []);
+        // 渲染内置规则集的复选列表；它同时会把勾中的规则集展开成内置规则行
+        renderRulesets(data.rulesets, preset);
+
+        // 记忆里的自定义规则行已经填好，和内置行一起出表
+        renderRuleTable();
+        syncRulesetsVisibility();
+      })
+      .catch(function (e) {
+        // 拿不到目录就不显示规则块（仍按服务端默认生成 rules），但把原因说出来 ——
+        // 之前这里静默吞异常，界面上看起来就是"什么都没有"，很难排查。
+        showCustomError("规则集目录加载失败：" + (e && e.message ? e.message : e));
+      });
+  }
+
+  /** 勾选变化时重算内置行（内置规则由规则集勾选决定，不是逐条勾）。 */
+  function refreshBuiltinRows(catalogue) {
+    var checked = selectedRuleSets();
+    BUILTIN_ROWS = [];
+    catalogue.forEach(function (item) {
+      if (checked.indexOf(item.id) < 0) return;
+      (item.rules || []).forEach(function (line) {
+        var parsed = splitRuleLine(line);
+        if (parsed) {
+          parsed.setId = item.id;
+          BUILTIN_ROWS.push(parsed);
+        }
+      });
+    });
+    renderRuleTable();
+  }
+
+  var RULESET_CATALOGUE = [];
+
   function renderRulesets(catalogue, preset) {
+    RULESET_CATALOGUE = catalogue;
     var list = $("rulesets-list");
+    if (!list) return;          // 结构缺失时别把整条初始化链炸掉
     list.innerHTML = "";
     RULESET_IDS = [];
     catalogue.forEach(function (item) {
@@ -409,24 +889,17 @@
       RULESET_IDS.push(item.id);
     });
     syncRulesetsVisibility();
+    refreshBuiltinRows(catalogue);
   }
 
-  /** 拉取规则集目录；失败就保持隐藏并沿用服务端默认，绝不阻塞转换。 */
-  function loadRulesets() {
-    return fetch("/api/rulesets")
-      .then(function (response) { return response.json(); })
-      .then(function (data) {
-        if (!data || !data.rulesets || !data.rulesets.length) return;
-        var saved = null;
-        try {
-          var state = JSON.parse(localStorage.getItem("subconv.state") || "null");
-          if (state && Array.isArray(state.rulesets)) saved = state.rulesets;
-        } catch (e) { /* localStorage 不可用时忽略 */ }
-        // 链接指定 > 上次记忆 > 服务端默认；注意 rulesetPreset 为空数组时不能回退
-        var preset = rulesetPreset !== null ? rulesetPreset : (saved || data["default"] || []);
-        renderRulesets(data.rulesets, preset);
-      })
-      .catch(function () { /* 拿不到目录就不显示，仍按服务端默认生成 rules */ });
+  function selectedRuleSets() {
+    return rulesetBoxes().filter(function (box) { return box.checked; })
+      .map(function (box) { return box.getAttribute("data-ruleset"); });
+  }
+
+  function rulesetBoxes() {
+    return Array.prototype.slice.call(
+      document.querySelectorAll("#rulesets-list input[data-ruleset]"));
   }
 
   // ---- DNS 预设：列表来自 /api/dns --------------------------------------------
@@ -532,6 +1005,9 @@
     // 目录没加载成功时留空（JSON.stringify 会丢掉 undefined 键）→ 用服务端默认
     if (RULESET_IDS !== null) options.rulesets = selectedRuleSets();
     if (DNS_IDS !== null) options.dns = selectedDns();
+    // 自定义规则集：JSON 写错会抛异常，交给 run() 统一报错并中止
+    var custom = selectedCustomRuleSets();
+    if (custom) options.custom_rulesets = custom;
     var chain = selectedChain();
     if (chain.length) options.chain = chain;
     var chainRear = selectedChainRear();
@@ -680,9 +1156,19 @@
   // ---- 主流程 ----------------------------------------------------------------
   function run() {
     clearError();
+    showCustomError("");
     var payload = splitInput($("input").value);
     payload.target = currentTarget();
-    payload.options = collectOptions();
+    // 自定义规则集 JSON 写错时 collectOptions 会抛 —— 在这里拦住并给出可读提示，
+    // 而不是让异常冒到控制台、界面上却什么都不发生。
+    try {
+      payload.options = collectOptions();
+    } catch (e) {
+      showCustomError("自定义规则集 JSON 有语法错误：" + e.message);
+      showError("自定义规则集 JSON 有语法错误，已在「分流规则集 → 自定义规则集」中展开，请修正后重试。");
+      setStatus("自定义规则集有误");
+      return;
+    }
     payload.fetch = collectFetch();
     // 订阅名是请求体的顶层字段（不走 options）
     var name = $("opt-name").value.trim();
@@ -817,7 +1303,8 @@
         proxy: $("opt-proxy").value,
         ua: $("opt-ua").value,
         chain: $("opt-chain").value,
-        chain_rear: $("opt-chain-rear").value
+        chain_rear: $("opt-chain-rear").value,
+        customRulesets: $("custom-rs-json").value
       }));
     } catch (e) { /* ignore */ }
   });
@@ -872,6 +1359,40 @@
     syncRulesetsVisibility();
     if (params.get("auto") === "1") run();
   }
+
+  // ---- 规则表：添加 / 选中 / 删除 ---------------------------------------------
+  $("rule-add-btn").addEventListener("click", addRuleFromInputs);
+  // 回车即入表（输入框里按回车是最顺手的路径）
+  $("rule-add-value").addEventListener("keydown", function (event) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addRuleFromInputs();
+    }
+  });
+  $("rule-delete-btn").addEventListener("click", deleteSelectedRule);
+
+  // 高级 JSON：失焦时回填表格（两处保持同步）
+  $("custom-rs-json").addEventListener("blur", function () {
+    var text = $("custom-rs-json").value.trim();
+    if (!text) {
+      showCustomError("");
+      CUSTOM_ROWS = [];
+      renderRuleTable();
+      return;
+    }
+    try {
+      CUSTOM_ROWS = parseCustomJson(text);
+      showCustomError("");
+      renderRuleTable();
+    } catch (e) {
+      showCustomError("JSON 语法错误：" + e.message);
+    }
+  });
+
+  // 规则集勾选变化 → 重算内置规则行（内置规则由规则集勾选决定）
+  $("rulesets-list").addEventListener("change", function () {
+    refreshBuiltinRows(RULESET_CATALOGUE);
+  });
 
   // 先把两份目录都拿到再预填/自动转换，避免 rulesets/dns 还没渲染就被 run() 读走
   loadRulesets().then(loadDns).then(prefillFromQuery);

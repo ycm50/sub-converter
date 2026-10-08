@@ -26,6 +26,15 @@
 3. 规则集只用 mihomo 自带的 GEOSITE/GEOIP，**不依赖远程 rule-provider**（那会让 mihomo 启动时
    必须联网下载，失败则整份配置起不来，且无法离线校验）。
 
+> **用户自定义规则集不需要改这里的任何文件，也不用重新编译**：它们由
+> `parse_custom_rule_sets()`（`src/emit/rulesets.cpp`）在运行时解析，来源是
+> `--ruleset-json` / `--ruleset-file`（CLI）、`options.custom_rulesets` / `?custom_rulesets=`
+> （HTTP）、或 Web UI 的「自定义规则集」编辑区。上面第 3 条对它们同样成立 ——
+> 自定义集的规则全是 `DOMAIN` / `DOMAIN-SUFFIX` / `DOMAIN-KEYWORD` 这类**内核原生规则**，
+> 依旧零远程依赖、可 `mihomo -t` 离线校验。
+>
+> 想**内置**一批规则集（随程序发布、界面默认就能勾）才需要动 `rulesets.cpp` 的目录表。
+
 设计原则：**不依赖远程规则集也能产出可用配置**。Clash 目标的分组内建在 `src/emit/clash.cpp`
 （3 个分组：节点选择 / 自动选择 / 漏网之鱼），规则由 `src/emit/rulesets.cpp` 按选中的规则集生成；
 Xray / sing-box 目标不含分组与规则。`pref.ini` / `groups.ini` 仍待做。

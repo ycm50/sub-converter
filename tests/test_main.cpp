@@ -409,19 +409,24 @@ void test_rulesets() {
     CHECK_EQ(rules.back(), std::string("MATCH,漏网之鱼"));
   }
 
-  // REJECT 必须排在所有 DIRECT 之前，否则广告域名会先命中直连规则被放行
+  // 内置集按**目录顺序**展开，不按 policy 重排。
+  // 目录里 ads（REJECT）在最后，所以它就该排在 local/cn（DIRECT）之后 ——
+  // 顺序与界面表格一致，用户改顺序能立刻看到效果。
   {
     const auto rules = rules_with({"local", "cn", "ads"});
     CHECK(!rules.empty());
     if (!rules.empty()) {
-      CHECK_EQ(rules.front(), std::string("GEOSITE,category-ads-all,REJECT"));
-      std::size_t reject_at = rules.size();
+      CHECK_EQ(rules.front(), std::string("GEOIP,LAN,DIRECT,no-resolve"));
       std::size_t direct_at = rules.size();
+      std::size_t reject_at = rules.size();
       for (std::size_t i = 0; i < rules.size(); ++i) {
         if (rules[i].find(",REJECT") != std::string::npos) reject_at = std::min(reject_at, i);
         if (rules[i].find(",DIRECT") != std::string::npos) direct_at = std::min(direct_at, i);
       }
-      CHECK(reject_at < direct_at);
+      // ads 在目录里位于 local/cn 之后
+      CHECK(direct_at < reject_at);
+      CHECK_EQ(rules[rules.size() - 2], std::string("GEOSITE,category-ads-all,REJECT"));
+      CHECK_EQ(rules.back(), std::string("MATCH,漏网之鱼"));
     }
   }
 
@@ -465,6 +470,298 @@ void test_rulesets() {
     auto out = subconv::emit_config(sub->nodes, opts);
     CHECK(out.has_value());
     if (out) CHECK(out->find("\nrules:\n") == std::string::npos);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 自定义规则集：用户自己列域名 / 关键字
+// ---------------------------------------------------------------------------
+void test_custom_rulesets() {
+  section("自定义规则集");
+
+  auto sub = subconv::parse_subscription("ss://YWVzLTI1Ni1nY206c3NwYXNz@ss.example.com:8443#SS\n");
+  CHECK(sub.has_value());
+  if (!sub) return;
+
+  auto rules_with = [&sub](const std::vector<std::string>& sets,
+                           const std::vector<subconv::CustomRuleSet>& custom) {
+    subconv::EmitOptions opts;
+    opts.target = "clash";
+    opts.emoji = false;
+    opts.rule_sets = sets;
+    opts.custom_rule_sets = custom;
+    auto out = subconv::emit_config(sub->nodes, opts);
+    CHECK(out.has_value());
+    return out ? rules_of(*out) : std::vector<std::string>{};
+  };
+
+  // ---- 解析：对象形态（key 即 id）----
+  {
+    auto parsed = subconv::parse_custom_rule_sets(
+        R"({"myads":{"policy":"REJECT","rules":[{"type":"DOMAIN-KEYWORD","value":"ads"},
+                                                 {"type":"DOMAIN-SUFFIX","value":"x.com"}]}})");
+    CHECK(parsed.has_value());
+    if (parsed) {
+      CHECK_EQ(parsed->size(), static_cast<std::size_t>(1));
+      if (!parsed->empty()) {
+        CHECK_EQ((*parsed)[0].id, std::string("myads"));
+        CHECK_EQ((*parsed)[0].name, std::string("myads"));  // 没写 name 就回落到 id
+        CHECK_EQ((*parsed)[0].policy, std::string("REJECT"));
+        CHECK_EQ((*parsed)[0].rules.size(), static_cast<std::size_t>(2));
+      }
+    }
+  }
+
+  // ---- 解析：数组形态 + 字符串简写 + name ----
+  {
+    auto parsed = subconv::parse_custom_rule_sets(
+        R"([{"id":"a","name":"甲","policy":"DIRECT","rules":["DOMAIN,a.com","DOMAIN-SUFFIX,b.com"]}])");
+    CHECK(parsed.has_value());
+    if (parsed) {
+      CHECK_EQ(parsed->size(), static_cast<std::size_t>(1));
+      if (!parsed->empty()) {
+        CHECK_EQ((*parsed)[0].id, std::string("a"));
+        CHECK_EQ((*parsed)[0].name, std::string("甲"));
+        CHECK_EQ((*parsed)[0].rules.size(), static_cast<std::size_t>(2));
+        if ((*parsed)[0].rules.size() == 2) {
+          CHECK_EQ((*parsed)[0].rules[0].type, std::string("DOMAIN"));
+          CHECK_EQ((*parsed)[0].rules[0].value, std::string("a.com"));
+        }
+      }
+    }
+  }
+
+  // ---- 空输入 = 没有自定义集（不是错误）----
+  {
+    auto parsed = subconv::parse_custom_rule_sets("");
+    CHECK(parsed.has_value());
+    if (parsed) CHECK(parsed->empty());
+    auto parsed_ws = subconv::parse_custom_rule_sets("   ");
+    CHECK(parsed_ws.has_value());
+    if (parsed_ws) CHECK(parsed_ws->empty());
+    auto parsed_obj = subconv::parse_custom_rule_sets("{}");
+    CHECK(parsed_obj.has_value());
+    if (parsed_obj) CHECK(parsed_obj->empty());
+  }
+
+  // ---- 错误必须被报出来，而不是静默丢弃 ----
+  {
+    // 非法 JSON
+    CHECK(!subconv::parse_custom_rule_sets("{oops").has_value());
+    // 与内置 id 撞名（会让规则集选择有歧义）
+    CHECK(!subconv::parse_custom_rule_sets(
+               R"({"cn":{"rules":[{"type":"DOMAIN","value":"a.com"}]}})")
+               .has_value());
+    // 自定义集之间 id 重复
+    CHECK(!subconv::parse_custom_rule_sets(
+               R"([{"id":"x","rules":[{"type":"DOMAIN","value":"a.com"}]},
+                   {"id":"x","rules":[{"type":"DOMAIN","value":"b.com"}]}])")
+               .has_value());
+    // 规则值里的逗号会把 `TYPE,VALUE,POLICY` 切断
+    CHECK(!subconv::parse_custom_rule_sets(
+               R"({"x":{"rules":[{"type":"DOMAIN","value":"a.com,b.com"}]}})")
+               .has_value());
+    // 规则类型拼错
+    CHECK(!subconv::parse_custom_rule_sets(
+               R"({"x":{"rules":[{"type":"DOMAIN-KEYWORDS","value":"a"}]}})")
+               .has_value());
+    // 没有 rules
+    CHECK(!subconv::parse_custom_rule_sets(R"({"x":{"policy":"DIRECT"}})").has_value());
+    // rules 为空数组
+    CHECK(!subconv::parse_custom_rule_sets(R"({"x":{"rules":[]}})").has_value());
+    // 缺少 value
+    CHECK(!subconv::parse_custom_rule_sets(R"({"x":{"rules":[{"type":"DOMAIN"}]}})").has_value());
+  }
+
+  // ---- 展开顺序 = 表格顺序：自定义规则整体在**内置规则之前**，且内部保持传入顺序 ----
+  {
+    auto parsed = subconv::parse_custom_rule_sets(
+        R"({"first":{"policy":"REJECT","rules":[{"type":"DOMAIN-KEYWORD","value":"ads"}]},
+            "second":{"policy":"DIRECT","rules":[{"type":"DOMAIN-SUFFIX","value":"example.com"}]}})");
+    CHECK(parsed.has_value());
+    if (parsed) {
+      const auto rules = rules_with({"local", "cn"}, *parsed);
+      CHECK(!rules.empty());
+      if (!rules.empty()) {
+        // 自定义规则在前，且保持我给它们的顺序（先 first 后 second）
+        CHECK_EQ(rules[0], std::string("DOMAIN-KEYWORD,ads,REJECT"));
+        CHECK_EQ(rules[1], std::string("DOMAIN-SUFFIX,example.com,DIRECT"));
+        // 内置规则随后
+        CHECK_EQ(rules[2], std::string("GEOIP,LAN,DIRECT,no-resolve"));
+        CHECK_EQ(rules[3], std::string("GEOSITE,cn,DIRECT"));
+        CHECK_EQ(rules.back(), std::string("MATCH,漏网之鱼"));
+      }
+    }
+  }
+
+  // ---- 回归：非 REJECT 的自定义规则也必须在**内置规则之前** ----
+  // 曾经的真实缺陷：只有 REJECT 会被提到前面，DIRECT / 代理组的自定义规则被挪到
+  // 内置规则之后，于是被 GEOSITE,cn 之类抢先命中而完全失效。
+  {
+    auto parsed = subconv::parse_custom_rule_sets(
+        R"({"mydirect":{"policy":"DIRECT","rules":[{"type":"DOMAIN-SUFFIX","value":"x.com"}]}})");
+    CHECK(parsed.has_value());
+    if (parsed) {
+      const auto rules = rules_with({"local", "cn"}, *parsed);
+      std::size_t custom_at = rules.size();
+      std::size_t builtin_at = rules.size();
+      for (std::size_t i = 0; i < rules.size(); ++i) {
+        if (rules[i] == "DOMAIN-SUFFIX,x.com,DIRECT") custom_at = std::min(custom_at, i);
+        if (rules[i] == "GEOSITE,cn,DIRECT") builtin_at = std::min(builtin_at, i);
+      }
+      CHECK(custom_at < builtin_at);
+    }
+  }
+
+  // ---- IP 类规则自动补 no-resolve，避免为了这条规则去解析域名 ----
+  {
+    auto parsed = subconv::parse_custom_rule_sets(
+        R"({"mynet":{"policy":"DIRECT","rules":[
+              {"type":"IP-CIDR","value":"10.0.0.0/8"},
+              {"type":"DOMAIN-KEYWORD","value":"foo"}]}})");
+    CHECK(parsed.has_value());
+    if (parsed) {
+      const auto rules = rules_with({"mynet"}, *parsed);
+      CHECK(std::find(rules.begin(), rules.end(),
+                      "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve") != rules.end());
+      // 域名类规则不该被补 no-resolve
+      CHECK(std::find(rules.begin(), rules.end(),
+                      "DOMAIN-KEYWORD,foo,DIRECT") != rules.end());
+    }
+  }
+
+  // ---- policy 可以是代理组名（走代理） ----
+  {
+    auto parsed = subconv::parse_custom_rule_sets(
+        R"({"proxy":{"policy":"🚀 节点选择","rules":[{"type":"DOMAIN-SUFFIX","value":"openai.com"}]}})");
+    CHECK(parsed.has_value());
+    if (parsed) {
+      const auto rules = rules_with({"proxy"}, *parsed);
+      CHECK(std::find(rules.begin(), rules.end(),
+                      "DOMAIN-SUFFIX,openai.com,🚀 节点选择") != rules.end());
+      // 非 REJECT 的策略排在 DIRECT 段，但仍要在 MATCH 之前
+      CHECK(!rules.empty());
+      if (!rules.empty()) CHECK_EQ(rules.back(), std::string("MATCH,漏网之鱼"));
+    }
+  }
+
+  // ---- 自定义集必须被显式选中才生效 ----
+  // 注意：**只要随请求给了自定义集就直接生效**，不要求 id 也在 rule_sets 里。
+  // 之前的实现要求两处都写，结果是"表格里有规则、产物里没有"（真实缺陷）。
+  {
+    auto parsed = subconv::parse_custom_rule_sets(
+        R"({"myads":{"policy":"REJECT","rules":[{"type":"DOMAIN-KEYWORD","value":"ads"}]}})");
+    CHECK(parsed.has_value());
+    if (parsed) {
+      const auto rules = rules_with({"local"}, *parsed);  // rule_sets 里没写 myads
+      CHECK(std::find(rules.begin(), rules.end(),
+                      "DOMAIN-KEYWORD,ads,REJECT") != rules.end());
+    }
+  }
+
+  // ---- 选中不存在的 id 时，告警里要把自定义集的 id 一并列出来 ----
+  {
+    auto parsed = subconv::parse_custom_rule_sets(
+        R"({"myads":{"policy":"REJECT","rules":[{"type":"DOMAIN-KEYWORD","value":"ads"}]}})");
+    CHECK(parsed.has_value());
+    if (parsed) {
+      subconv::EmitOptions opts;
+      opts.target = "clash";
+      opts.emoji = false;
+      opts.rule_sets = {"nope"};
+      opts.custom_rule_sets = *parsed;
+      std::vector<std::string> warnings;
+      auto out = subconv::emit_config(sub->nodes, opts, &warnings);
+      CHECK(out.has_value());
+      const std::string joined = join(warnings, " | ");
+      CHECK(joined.find("无法识别的规则集") != std::string::npos);
+      CHECK(joined.find("myads") != std::string::npos);  // 可用列表里应有自定义集
+    }
+  }
+
+  // ---- 回归：界面提交的原样 payload，自定义规则必须出现在产物里 ----
+  // 这条曾经真实失败过：界面把 custom_rulesets 发上来了，但 rulesets 里只有内置集，
+  // 后端要求两处都写才展开 → 表格里有规则、产物里一条都没有。
+  {
+    subconv::server::ServerOptions defaults;
+    const char* body =
+        R"({"sources":[],"content":"ss://YWVzLTI1Ni1nY206c3NwYXNz@ss.example.com:8443#SS",)"
+        R"("target":"clash","options":{"rulesets":["local","cn"],)"
+        R"("custom_rulesets":{"custom-rules":{"policy":"REJECT","rules":[)"
+        R"({"type":"DOMAIN-SUFFIX","value":"openai.com"},)"
+        R"({"type":"DOMAIN-KEYWORD","value":"doubleclick"}]}}}})";
+    auto req = subconv::server::request_from_json(body, defaults);
+    CHECK(req.has_value());
+    if (req) {
+      CHECK_EQ(req->emit.custom_rule_sets.size(), static_cast<std::size_t>(1));
+      auto res = subconv::server::convert(*req);
+      CHECK(res.has_value());
+      if (res) {
+        CHECK(res->config.find("DOMAIN-SUFFIX,openai.com,REJECT") != std::string::npos);
+        CHECK(res->config.find("DOMAIN-KEYWORD,doubleclick,REJECT") != std::string::npos);
+        // 内置规则仍在，且自定义的 REJECT 排在它们前面
+        CHECK(res->config.find("GEOSITE,cn,DIRECT") != std::string::npos);
+        const std::size_t custom_at = res->config.find("openai.com,REJECT");
+        const std::size_t builtin_at = res->config.find("GEOSITE,cn,DIRECT");
+        CHECK(custom_at < builtin_at);
+      }
+    }
+  }
+
+  // ---- 规则类型目录：value 必须是内核认的字面名，label 只是中文对照 ----
+  {
+    const auto types = subconv::rule_type_catalogue();
+    CHECK(types.size() >= static_cast<std::size_t>(8));
+    std::set<std::string> values;
+    for (const auto& t : types) {
+      CHECK(!t.value.empty());
+      CHECK(!t.label.empty());
+      CHECK(!t.note.empty());
+      // 类型名是内核按字面比较的：必须全大写、只含 A-Z0-9 与连字符，
+      // 否则写进配置会被内核当成未知类型直接加载失败
+      for (const char c : t.value) {
+        const bool ok = (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-';
+        CHECK(ok);
+      }
+      CHECK(values.insert(t.value).second);  // 不能重复
+    }
+    // 几个主力类型必须在
+    for (const char* must : {"DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD"}) {
+      CHECK(values.count(must) == 1);
+    }
+  }
+
+  // ---- 目录里的 custom 标记：内置集全是 false ----
+  {
+    for (const auto& rs : subconv::rule_set_catalogue()) CHECK(!rs.custom);
+  }
+
+  // ---- HTTP 请求层：options.custom_rulesets 解析失败要报错，不能静默丢弃 ----
+  {
+    subconv::server::ServerOptions defaults;
+    auto ok = subconv::server::request_from_json(
+        R"({"content":"x","options":{"rulesets":["myads"],
+             "custom_rulesets":{"myads":{"policy":"REJECT",
+               "rules":[{"type":"DOMAIN-KEYWORD","value":"ads"}]}}}})",
+        defaults);
+    CHECK(ok.has_value());
+    if (ok) {
+      CHECK_EQ(ok->emit.custom_rule_sets.size(), static_cast<std::size_t>(1));
+    }
+    auto bad = subconv::server::request_from_json(
+        R"({"content":"x","options":{"custom_rulesets":{"cn":{"rules":[{"type":"DOMAIN","value":"a.com"}]}}}})",
+        defaults);
+    CHECK(!bad.has_value());
+
+    // 查询串形态：?custom_rulesets=<JSON>
+    auto from_query = subconv::server::request_from_query(
+        "content=x&rulesets=myads&custom_rulesets=%7B%22myads%22%3A%7B%22policy%22%3A%22REJECT%22%2C"
+        "%22rules%22%3A%5B%7B%22type%22%3A%22DOMAIN-KEYWORD%22%2C%22value%22%3A%22ads%22%7D%5D%7D%7D",
+        defaults);
+    CHECK(from_query.has_value());
+    if (from_query) {
+      CHECK_EQ(from_query->emit.custom_rule_sets.size(), static_cast<std::size_t>(1));
+    }
   }
 }
 
@@ -3400,6 +3697,7 @@ int main() {
   test_subscription();
   test_clash_emit();
   test_rulesets();
+  test_custom_rulesets();
   test_dns_and_name();
   test_advanced_protocols();
   test_emit_targets();

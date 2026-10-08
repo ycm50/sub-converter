@@ -29,6 +29,8 @@
 - [客户端导入](#客户端导入)
 - [分享链接输出（v2rayNG）](#分享链接输出v2rayng)
 - [分流规则集（rules，仅 Clash 目标）](#分流规则集rules仅-clash-目标)
+  - [自定义规则集（自己列域名 / 关键字）](#自定义规则集自己列域名--关键字)
+  - [规则类型中文对照](#规则类型中文对照)
 - [链式代理（前置 / 中转）](#链式代理前置--中转)
 - [DNS（dns.nameserver）与 IPv6](#dnsdnsnameserver与-ipv6)
 - [订阅名称](#订阅名称)
@@ -63,6 +65,10 @@
   两者分别落到 Xray 的 `sockopt.dialerProxy`、mihomo 的 `dialer-proxy`、sing-box 的 `detour`；
   输入里已有的链路也会被解析并原样再输出 ——
   见「[链式代理](#链式代理前置--后置)」。
+- **可自定义的分流规则**：除了内置规则集（勾选 `GEOSITE`/`GEOIP` 大类），还能把自己的
+  **域名 / 后缀 / 关键字**加进规则表，随订阅一起产出。CLI 用 `--ruleset-json` / `--ruleset-file`，
+  HTTP 用 `options.custom_rulesets` / `?custom_rulesets=`，Web UI 是一张可直接增删的规则表 ——
+  见「[自定义规则集](#自定义规则集自己列域名--关键字)」。
 - **真实内核校验**：每个目标都用 mihomo / Xray / sing-box 的真实二进制校验产物。
 - **Windows 编码认真处理**：内部字符串一律 UTF-8，控制台输出按代码页转换，中文订阅名与中文路径都可用。
 - **一份源码、九个平台**：Linux（x86_64 / aarch64 / armv7l / i686 / riscv64）、
@@ -77,14 +83,16 @@
 | M1 | `ss`/`socks5`/`http` 解析 + Clash YAML 输出 | ✅ |
 | M2 | 全协议解析 + **Xray** / **sing-box** 目标 | ✅ |
 | M3 | libcurl 订阅抓取（代理 / 重定向 / 缓存 / 内容嗅探） | ✅ |
-| M4 | 规则模板引擎 + 分组生成 + 过滤 / 重命名 / emoji | 🚧 分组与**可挑选的分流规则集**已内建（见「[分流规则集](#分流规则集rules仅-clash-目标)」）；模板外置 `data/`、节点过滤 / 重命名待做 |
+| M4 | 规则模板引擎 + 分组生成 + 过滤 / 重命名 / emoji | 🚧 分组与**可挑选的分流规则集**（含**用户自定义规则集**）已内建（见「[分流规则集](#分流规则集rules仅-clash-目标)」）；模板外置 `data/`、节点过滤 / 重命名待做 |
 | M5 | HTTP `/sub` 服务 + **Web UI** | ✅ 见「[Web UI 与 HTTP 接口](#web-ui-与-http-接口)」 |
 | M6 | golden file 测试 + **多平台发布** + 文档 | ✅ Release 一次挂 9 个平台（Linux 5 架构 / Windows 2 架构 / Termux 2 架构），见「[支持的平台](#支持的平台)」；golden file 测试仍待做 |
 
 > **当前状态**：M0–M3、M5 已完成，M4 进行中。
 > Clash 目标已生成 3 个 emoji 分组（🚀 节点选择 / ♻️ 自动选择 / 🐟 漏网之鱼，`--no-emoji` 可关闭）
 > 与可挑选的 rules（默认 4 条：`GEOIP,LAN` / `GEOSITE,cn` / `GEOIP,CN` / `MATCH`，
-> 用 `--rulesets` 或 Web UI 的复选增减）；
+> 用 `--rulesets` 或 Web UI 的勾选增减）；规则集不限于内置的那些 —— 还能用
+> `--ruleset-json` / 界面上的**规则表**列出**自己的域名与关键字**
+> （见「[自定义规则集](#自定义规则集自己列域名--关键字)」）；
 > 另有可挑选的 `dns.nameserver`（默认 `cloudflare,google`，**不再是原来的 223.5.5.5**）与
 > `ipv6`（默认 **开**），见「[DNS 与 IPv6](#dnsdnsnameserver与-ipv6)」；还支持设置订阅名称，
 > 见「[订阅名称](#订阅名称)」。
@@ -124,6 +132,22 @@
 > 写进内核配置时**必须把 base64 密钥的 `=` 补回来**（分享链接里没有，mihomo 会直接拒绝加载）；
 > WARP 的 `reserved` 三个字节漏了会「握手成功但完全不通」。能转成什么、为什么不能转成
 > vmess/vless，见「[WireGuard](#wireguard能转成什么不能转成什么)」。
+>
+> **2026-10 补充**：**分流规则可以自己加了** —— 内置规则集只覆盖 `GEOSITE`/`GEOIP` 大类，
+> 现在能把自己的域名 / 后缀 / 关键字作为**自定义规则集**随订阅一起产出
+> （CLI `--ruleset-json` / `--ruleset-file`，HTTP `options.custom_rulesets` / `?custom_rulesets=`）。
+> Web UI 从「一排规则集复选」改成**一张规则表**：勾选的内置集展开成「内置」行，自己加的排在最上面，
+> 点行可删（内置行只读），类型下拉带**中文对照**。CLI + HTTP + Web UI 三处都通，
+> 并用 mihomo v1.19.30 校验过产物。三个踩过的点：
+>
+> - **产物顺序 = 表格顺序**。早期版本按 policy 把 `REJECT` 整体提到最前，结果是表格顺序和产物顺序
+>   对不上（用户改顺序看不到变化），且**非 `REJECT` 的自定义规则被挪到内置规则之后而完全失效**；
+> - **`custom_rulesets` 给了就生效**，不要求 id 再写进 `--rulesets`（早期要求两处都写，
+>   于是「表格里有规则、产物里没有」）；
+> - **`value` 不能含逗号**（会切断 `TYPE,VALUE,POLICY` 三段式）、**IP 类规则自动补 `no-resolve`**，
+>   这些都在解析阶段前置校验，而不是产出一份加载不了的配置。
+>
+> 详见「[自定义规则集](#自定义规则集自己列域名--关键字)」与「[规则类型中文对照](#规则类型中文对照)」。
 
 **目标优先级**：Clash(mihomo) → Xray → sing-box。
 
@@ -694,6 +718,13 @@ subconv 0.1.0 - 订阅转换工具
       --no-rules           不输出 rules 段（只生成 proxies/proxy-groups）
       --rulesets <列表>    分流规则集（clash 目标），逗号分隔；见 --list-rulesets
                            默认 local,cn；给空串则只留 MATCH 兜底
+                           自定义规则集的 id 也写在这里
+      --ruleset-json <JSON>    追加自定义规则集：自己列域名 / 关键字，可重复
+                               {"id":{"policy":"REJECT","rules":[
+                                  {"type":"DOMAIN-KEYWORD","value":"ads"}]}}
+                               rules 也接受简写字符串 "DOMAIN-KEYWORD,ads"
+                               policy 可为 DIRECT / REJECT，或某个代理组名（走代理）
+      --ruleset-file <文件>    从文件读自定义规则集（格式同上），可重复
       --dns <列表>         dns.nameserver：预设 id 或字面地址（IP / DoH URL），逗号分隔
                            见 --list-dns，默认 cloudflare,google；给空串则不写 nameserver
       --ipv6 / --no-ipv6   根节点与 dns 段的 ipv6，默认开
@@ -913,8 +944,14 @@ v2rayN（Xray 内核）导入。`clash` / `singbox` / `xray` 目标不受影响�
 | `onedrive` | OneDrive 直连 | DIRECT | `GEOSITE,onedrive` |
 | `ads` | 广告拦截 | REJECT | `GEOSITE,category-ads-all` |
 
-**顺序语义**：clash 是首个命中生效，所以 `rules:` 里 **REJECT 类永远排在 DIRECT 类之前**（否则广告域名会先
-命中某条直连规则被放行）；同类之间按**上表顺序**（与勾选先后无关），最后永远是 `MATCH,<漏网之鱼>`。
+**顺序语义**：clash 是首个命中生效，`rules:` 的顺序就是**匹配优先级**。
+产物严格照抄界面上表格的顺序 —— 自定义规则在前（按添加顺序），内置规则集随后（按**上表目录顺序**，与勾选先后无关），
+最后永远是 `MATCH,<漏网之鱼>`。**不按 policy 重排**：早期版本会把 REJECT 类整体提到最前，
+结果是产物顺序和界面表格对不上，用户调整顺序看不到任何变化。
+
+> 想用「广告拦截」压住「中国直连」时，把 `ads` 加为**自定义规则集**放在表格上方即可
+> （或在界面里把它排到前面）—— 而不是依赖内核替你重排。
+
 一个都不选也是合法配置（只剩 `MATCH` 兜底）。GEOIP 类规则会自动带 `no-resolve`，避免为了匹配 IP
 规则而多做一次 DNS 解析。
 
@@ -929,6 +966,99 @@ v2rayN（Xray 内核）导入。`clash` / `singbox` / `xray` 目标不受影响�
 
 界面里那排复选不是写死在 HTML 里的：列表来自 `GET /api/rulesets`，C++ 侧的 `rule_set_catalogue()`
 是唯一真源，避免两边各维护一份。改 `src/emit/rulesets.cpp` 里的目录表即可增删。
+
+### 自定义规则集（自己列域名 / 关键字）
+
+内置集只覆盖内核自带的 GEOSITE/GEOIP 大类；要按**具体域名**分流就得自己列。
+
+**Web UI** 里是一张**规则表**：勾选的内置规则集先展开成表格里的「内置」行，你在上方
+用「类型 + 值 + 处置」加进去的规则是「自定义」行，**插在整张表最上面**；点某一行会高亮并
+出现「删除选中规则」（内置行只读，删不掉 —— 要改就取消勾选对应的规则集）。
+
+命令行等价物是 `--ruleset-json` / `--ruleset-file`：
+
+```powershell
+.\build\subconv.exe -i up.yaml -t clash `
+  --rulesets local,cn,myads,myproxy `
+  --ruleset-json '{"myads":{"policy":"REJECT","rules":[
+      {"type":"DOMAIN-KEYWORD","value":"doubleclick"},
+      {"type":"DOMAIN-SUFFIX","value":"googlesyndication.com"},
+      {"type":"DOMAIN","value":"ads.example.com"}]},
+    "myproxy":{"policy":"🚀 节点选择","rules":[
+      {"type":"DOMAIN-SUFFIX","value":"openai.com"}]}}'
+```
+
+两种写法都收，**写起来最省事的是字符串简写**：
+
+```jsonc
+// 形态 A：对象，key 就是规则集 id
+{"myads": {"policy": "REJECT", "rules": ["DOMAIN-KEYWORD,doubleclick", "DOMAIN,a.com"]}}
+
+// 形态 B：数组，id 写在元素里（需要单独写 name 时用这个）
+[{"id": "myads", "name": "广告加强", "policy": "REJECT",
+  "rules": [{"type": "DOMAIN-SUFFIX", "value": "googlesyndication.com"}]}]
+```
+
+| 字段 | 说明 |
+|---|---|
+| key / `id` | 规则集标识，用于报错定位与去重；不能与内置集重名 |
+| `name` | 界面显示名，可省（缺省用 id） |
+| `policy` | `DIRECT` / `REJECT`，或**任意代理组名**（如 `🚀 节点选择`）表示走代理 |
+| `rules` | 规则数组；每项可以是对象 `{"type","value"}`，或字符串 `"TYPE,VALUE"` |
+
+### 规则类型中文对照
+
+界面的类型下拉显示中文对照，**写进配置的始终是原始类型名**（内核按字面比较，大小写敏感）。
+完整列表见 [mihomo 路由规则文档](https://wiki.metacubex.one/config/rules/)：
+
+| 中文对照 | `type`（写进配置的值） | 含义 | 例 |
+|---|---|---|---|
+| 精确域名 | `DOMAIN` | 只匹配完全相同的域名 | `DOMAIN,ads.example.com` |
+| 域名后缀 | `DOMAIN-SUFFIX` | 匹配该域名及其子域名 | `DOMAIN-SUFFIX,example.com` 命中 `www.example.com`，但不命中 `notexample.com` |
+| 域名关键字 | `DOMAIN-KEYWORD` | 域名里含该关键字即命中 | `DOMAIN-KEYWORD,doubleclick` |
+| 域名通配符 | `DOMAIN-WILDCARD` | 通配符（仅 `*` `?`） | `DOMAIN-WILDCARD,*.google.com` |
+| 域名正则 | `DOMAIN-REGEX` | 正则匹配 | `DOMAIN-REGEX,^ads?\.` |
+| 内置域名库 | `GEOSITE` | 内核自带的分类域名库 | `GEOSITE,cn` |
+| IP 网段 | `IP-CIDR` | IPv4/IPv6 网段，自动补 `no-resolve` | `IP-CIDR,10.0.0.0/8` |
+| IP 网段（v6 写法） | `IP-CIDR6` | 与 `IP-CIDR` 等价 | `IP-CIDR6,2001:db8::/32` |
+| IP 所属国家 | `GEOIP` | 按 IP 归属地匹配 | `GEOIP,CN` |
+| 目标端口 | `DST-PORT` | 按目标端口匹配 | `DST-PORT,443` |
+| 进程名 | `PROCESS-NAME` | 按进程匹配（安卓可填包名） | `PROCESS-NAME,com.example` |
+| 网络类型 | `NETWORK` | 按 tcp / udp 匹配 | `NETWORK,udp` |
+
+> 这份对照表是界面类型下拉的**唯一真源**（`rule_type_catalogue()`，经 `GET /api/rulesets`
+> 的 `rule_types` 下发）。`value` 必须与内核字面一致 —— 内核按字符串比较、大小写敏感，
+> 写错会直接 `unsupported rule type` 加载失败；中文只用于显示，绝不参与生成配置。
+
+几条行为约定：
+
+- **顺序 = 表格顺序**：自定义规则整体排在**所有内置规则之前**，内部保持你添加的顺序
+  （新加的排最前）；不按 policy 重排。所以自定义的 `REJECT` 天然压住内置的 `GEOSITE,cn`。
+- **IP 类规则自动补 `no-resolve`**（`IP-CIDR` / `IP-CIDR6` / `GEOIP` / `IP-ASN` / `SRC-*`）：
+  不补的话 mihomo 会为了这条规则去解析域名，既拖慢首次匹配也把 DNS 泄露给解析器。
+- **给了就生效，不用另外"选中"**：随请求带上自定义集（`--ruleset-json` / `options.custom_rulesets`）
+  它就会展开 —— 不需要再把 id 写进 `--rulesets`。你能把规则加进来，就已经表达了要用它。
+  （`--rulesets` 只管**内置**集的挑选；写不写自定义集的 id 都不影响。）
+- **校验前置**：值里出现逗号会切断 `TYPE,VALUE,POLICY` 三段式，`policy` 里有逗号同理 ——
+  这些都在解析阶段就报错退出，而不是产出一份加载不了的配置。id 与内置集重名、自定义集之间
+  重名、`rules` 为空、拼错规则类型，同样当场报错。
+- **自定义集的 id 建议用 ASCII**：Windows 命令行把非 ASCII 参数按 ANSI 传给进程，中文 id
+  从 `--rulesets` 走会变成非法 UTF-8。界面（HTTP/JSON，全 UTF-8）没有这个问题，但统一
+  用 ASCII 能少踩一个坑。
+
+> `--list-rulesets` 会把自定义集一并列出来：
+> ```powershell
+> .\build\subconv.exe --list-rulesets --ruleset-json '{"myads":{"policy":"REJECT","rules":["DOMAIN-KEYWORD,ads"]}}'
+> ```
+
+HTTP 侧同样可用（`POST /api/convert` 用 `options.custom_rulesets`，查询串用
+`?custom_rulesets=<URL 编码的 JSON>`）：
+
+```powershell
+# 直接给客户端当订阅用
+http://127.0.0.1:25500/sub?target=clash&url=<订阅>&rulesets=local,myads
+  &custom_rulesets=%7B%22myads%22%3A%7B%22policy%22%3A%22REJECT%22%2C%22rules%22%3A%5B%22DOMAIN-KEYWORD%2Cads%22%5D%7D%7D
+```
 
 ## 链式代理（前置 / 后置）
 
@@ -1119,9 +1249,17 @@ Clash YAML，填**订阅名称**（在高级选项之外），选目标（Clash 
 v2rayNG 订阅 / v2rayNG 完整），勾选项（emoji、UDP、去重、rules、排序、TFO、IPv6、
 **探测证书指纹**、原版 Clash 语法），
 配置代理 / UA / 超时 / 重试，转换后直接复制或下载；界面还会给出可填进客户端的 `/sub` 地址，
-并在链接类目标下显示「链接 N 条」。勾上「输出 rules」会展开**分流规则集复选**，「高级选项」里
-还有 **DNS 复选 + 自定义地址**与**链式代理输入框**，这些选择都会记在浏览器里、也会写进生成的
-`/sub` 链接。
+并在链接类目标下显示「链接 N 条」。勾上「输出 rules」会展开**分流规则表**（默认就在「高级选项」
+外面，一眼能看到）：
+
+- 上半部分是**内置规则集的勾选**（直连本地 / 中国直连 / 广告拦截 …），勾中即把它的规则展开到表里；
+- 下半部分是一张**规则表**：上面是**内置行**（来自勾选的规则集），你在表上方用
+  「类型 + 值 + 处置」加进去的是**自定义行**，按 `回车` 或点「添加」入表，**新规则排在最上面**；
+- 点某一行会高亮，下方出现「删除选中规则」；**内置行只读**（按钮置灰，要改就取消勾选对应规则集）；
+- 表的顺序就是产物的顺序，改完直接点「转换」即可看到效果。
+
+「高级选项」里还有 **DNS 复选 + 自定义地址**与**链式代理输入框**，这些选择都会记在浏览器里、
+也会写进生成的 `/sub` 链接。
 选「v2rayNG 订阅」时，把生成的那个 `/sub?target=base64&url=…` 地址填进 v2rayNG 的「订阅设置」
 就能自动更新。
 
@@ -1139,7 +1277,7 @@ HTTP 接口是 subconverter 的兼容子集：
 |---|---|
 | `GET /` | Web UI |
 | `GET /api/version`（`/version` 亦可） | 版本、已实现 / 规划中的目标、libcurl 是否可用 |
-| `GET /api/rulesets` | 分流规则集目录（id / 名称 / 策略 / 说明 + 默认选择） |
+| `GET /api/rulesets` | 分流规则集目录（id / 名称 / 策略 / 说明 / 展开后的规则 + 默认选择），另含 `rule_types`（类型名 + 中文对照）供 Web UI 渲染规则表 |
 | `GET /api/dns` | DNS 预设目录（id / 名称 / 区域 / IPv4 / IPv6 + 默认选择） |
 | `POST /api/convert` | JSON 进 JSON 出：`{target, filename, sources[], content, options{}, fetch{}}` |
 | `GET /sub?target=&url=` | 返回配置文本；`url` 可用 `\|` 分隔多个，也可重复出现（`url` / `urls` / `s` 等价） |
@@ -1157,6 +1295,7 @@ HTTP 接口是 subconverter 的兼容子集：
 | `probe_cert_timeout` | `probe_cert` 的单节点探测超时（秒），默认 5 |
 | `chain` | 链式代理的一跳，**可重复出现**（顺序即「最外侧 → 最内侧」），也可用 `\|` 分隔多项；值与 `--chain` 相同（分享链接或 `@节点名`）。见「[链式代理](#链式代理前置--中转)」 |
 | `rulesets` `dns` | 逗号分隔列表，见下表 |
+| `custom_rulesets` | 自定义规则集（URL 编码的 JSON），写法与 `--ruleset-json` 相同。见「[自定义规则集](#自定义规则集自己列域名--关键字)」 |
 | `proxy` `ua` `timeout` `retries` | 抓取参数 |
 | `insecure` | 跳过 TLS 证书校验 |
 | `cache_dir` `cache_ttl` `no_cache` | 缓存控制 |
@@ -1237,6 +1376,23 @@ Web UI 的输入框也已改成保留缩进（`node tools/check-web-input.mjs` �
 **`mihomo -t` 报 `list xxx not found in geosite.dat`**：配置里用了 `GEOSITE`，但客户端没有
 `geosite.dat`。mihomo 首次加载会自动下载；离线/下载失败时请手动放置，或只选
 `--rulesets local`（纯 GEOIP，不依赖 geosite.dat）。
+
+**我自己加的规则没出现在产物里** —— 按这两点查：
+
+1. **规则有没有真的发出去**。规则不是"配一次服务端就记住"的：Web UI 里加的规则存在浏览器
+   （localStorage），提交时走 `options.custom_rulesets`；直接用 `/sub` 链接则要带
+   `&custom_rulesets=<URL 编码的 JSON>`。**只写 `&rulesets=local,cn` 是不会带上你的规则的**
+   —— `rulesets` 只管内置集的挑选。对着 `/sub` 链接检查一下有没有这个参数。
+2. **看产物 `rules:` 段的顺序**。自定义规则整体排在**内置规则之前**；如果你要拦的域名同时也
+   命中内置的直连集（如 `GEOSITE,cn`），而你的规则又排在它后面，就会被抢先放行 ——
+   把它放到表格更上面即可（产物顺序 = 表格顺序，所见即所得）。
+
+> 服务的**日志/告警**也会说话：无法识别的 id、拼错的类型、值里带逗号都会明确报出来，
+> 不会静默吞掉。
+
+**`mihomo -t` 报 `unsupported rule type: XXX`**：自定义规则里的 `type` 拼错了。内核按字面
+比较类型名（大小写敏感），必须是 `DOMAIN` / `DOMAIN-SUFFIX` / `DOMAIN-KEYWORD` 这类准确写法 ——
+对照「[规则类型中文对照](#规则类型中文对照)」里的 `type` 列。
 
 **HTTPS 抓取报 `error adding trust anchors from file`**：MSYS2 的 `ucrt64` 偶尔会留下 **0 字节**的
 `etc/ssl/certs/ca-bundle.crt`，而 libcurl 的内置默认路径正指向它。subconv 会自动退回到
@@ -1364,6 +1520,8 @@ node tools/check-web-input.mjs
   → 在 `tests/test_main.cpp` 加断言。漏掉 emit 分支会在编译期报 `-Wswitch`（工程开着 `-Wall -Wextra`）。
 - **加规则集 / DNS 预设**：只改 `src/emit/rulesets.cpp` / `src/emit/dns.cpp` 的目录表。
   CLI（`--list-*`）、HTTP（`GET /api/*`）、Web UI 的复选都会自动跟着变 —— 这是刻意的单一真源设计。
+  （用户想**临时**加自己的域名规则不用改代码：用 `--ruleset-json` / 界面上的「自定义规则集」，
+  见「[自定义规则集](#自定义规则集自己列域名--关键字)」。）
 - **改 Web UI**：编辑 `data/web/index.html`，CMake 在配置阶段把它读成 C++ 原始字符串写进
   `build/generated/web_ui.hpp`（已设 `CMAKE_CONFIGURE_DEPENDS`，改文件会触发重新配置）。
   动了输入框切分（`splitInput`）就跑一下 `node tools\check-web-input.mjs`：YAML / JSON 靠缩进，
@@ -1528,6 +1686,8 @@ subconv-v1.0-linux-x86_64/
 │  ├─ fetch/                 libcurl 抓取、内容嗅探、磁盘缓存、离线降级
 │  │                        certprobe.cpp：--probe-cert 的 OpenSSL 证书指纹探测（可选依赖）
 │  ├─ emit/                  渲染器：clash / xray / singbox / 分享链接 / 规则集 / DNS
+│  │                        rulesets.cpp：内置规则集目录 + 规则类型对照表 +
+│  │                          用户自定义规则集（解析 / 校验 / 展开，rules: 顺序的唯一真源）
 │  │                        xhttp.cpp：XHTTP 在 mihomo / Xray / 分享链接三种形态间的公共换算
 │  ├─ server/                HTTP 服务 + Web UI（request 映射 / convert 核心 / http 传输三层分离）
 │  └─ cli/                   main（参数解析与终端输出）

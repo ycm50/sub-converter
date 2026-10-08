@@ -37,6 +37,14 @@ compile_commands.json
 *.gcda
 *.gcno
 NUL
+# 散落出来的可执行产物（本仓库自己编出的 exe 都在 build*/ 下，已被上面覆盖）
+*.exe
+
+# Node：只用于开发期的 Web UI 回归脚本（tools/check-web-input.mjs，
+# 以及临时用 Chrome DevTools Protocol 驱动真实浏览器做端到端检查时装的 ws）。
+# 这些依赖不入库。
+node_modules/
+package-lock.json
 
 # 操作系统
 .DS_Store

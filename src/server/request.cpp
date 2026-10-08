@@ -144,6 +144,13 @@ Result<ConvertRequest> request_from_query(std::string_view query, const ServerOp
   if (auto sets = list_param(params, "rulesets"); sets.has_value()) {
     req.emit.rule_sets = std::move(*sets);
   }
+  // `?custom_rulesets=<JSON>`：自定义规则集（URL 编码的 JSON），
+  // 写法与 --ruleset-json / options.custom_rulesets 完全一致。
+  if (auto custom = text_param(params, "custom_rulesets", std::string()); !custom.empty()) {
+    auto parsed = parse_custom_rule_sets(custom);
+    if (!parsed) return fail("自定义规则集（custom_rulesets）解析失败：" + parsed.error().message);
+    req.emit.custom_rule_sets = std::move(*parsed);
+  }
   if (auto dns = list_param(params, "dns"); dns.has_value()) {
     req.emit.dns = std::move(*dns);
   }
@@ -224,6 +231,7 @@ Result<ConvertRequest> request_from_json(std::string_view body, const ServerOpti
   req.emit.target = get_string(root, "target", defaults.default_target);
   req.filename = get_string(root, "filename", std::string());
   req.content = get_string(root, "content", std::string());
+  std::string custom_rule_sets_error;
 
   if (const auto it = root.find("sources"); it != root.end()) {
     if (it->is_array()) {
@@ -250,6 +258,18 @@ Result<ConvertRequest> request_from_json(std::string_view body, const ServerOpti
     req.emit.include_rules = get_bool(options, "rules", req.emit.include_rules);
     req.emit.clash_legacy = get_bool(options, "clash_legacy", req.emit.clash_legacy);
     req.emit.rule_sets = get_string_list(options, "rulesets", req.emit.rule_sets);
+    // 自定义规则集：对象 / 数组（见 parse_custom_rule_sets），或整串 JSON 文本。
+    // 解析失败时把错误攒起来交给上层报 400，而不是静默忽略 —— 用户手写的规则
+    // 被悄悄丢掉会得到"改了没生效"的迷惑结果。
+    if (const auto it = options.find("custom_rulesets"); it != options.end()) {
+      const std::string text = it->is_string() ? it->get<std::string>() : it->dump();
+      auto parsed = parse_custom_rule_sets(text);
+      if (!parsed) {
+        custom_rule_sets_error = parsed.error().message;
+      } else {
+        req.emit.custom_rule_sets = std::move(*parsed);
+      }
+    }
     req.emit.dns = get_string_list(options, "dns", req.emit.dns);
     req.emit.ipv6 = get_bool(options, "ipv6", req.emit.ipv6);
     req.emit.probe_cert = get_bool(options, "probe_cert", req.emit.probe_cert);
@@ -308,6 +328,10 @@ Result<ConvertRequest> request_from_json(std::string_view body, const ServerOpti
   if (defaults.verbose) {
     req.load.verbose = true;
     req.load.http.verbose = true;
+  }
+  // 自定义规则集解析失败的统一出口：直接让请求失败，错误信息带上原因
+  if (!custom_rule_sets_error.empty()) {
+    return fail("自定义规则集（options.custom_rulesets）解析失败：" + custom_rule_sets_error);
   }
   return req;
 }

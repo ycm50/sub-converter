@@ -26,13 +26,70 @@ Result<Subscription> parse_subscription(std::string_view raw, std::string source
 struct RuleSetInfo {
   std::string id;      ///< 稳定标识：--rulesets / ?rulesets= / JSON options.rulesets
   std::string name;    ///< 界面显示名
-  std::string policy;  ///< 该集合的处置：DIRECT / REJECT
+  /// 该集合的处置：`DIRECT` / `REJECT`，或任意代理组名（自定义规则集才有）。
+  std::string policy;
   std::string note;    ///< 一句话说明（含实际用到的匹配方式）
+  /// 是否用户自定义（内置集为 false）。界面靠它把「自定义」与「内置」分开显示。
+  bool custom = false;
+  /// 该集合展开后的规则行（`TYPE,VALUE,POLICY` 形态，与写进 `rules:` 的一致）。
+  /// 界面把它平铺成一张规则表，所以这里必须给出真实展开结果 ——
+  /// 否则界面只能自己拼规则，就又出现两份真源了。
+  std::vector<std::string> rules;
+};
+
+/// 一条自定义规则。`type` 是 mihomo 的规则类型（DOMAIN / DOMAIN-SUFFIX /
+/// DOMAIN-KEYWORD / DOMAIN-WILDCARD / DOMAIN-REGEX / IP-CIDR / GEOIP …），
+/// `value` 是它的匹配值。
+struct CustomRule {
+  std::string type;
+  std::string value;
+};
+
+/// 用户自定义的规则集：把若干条规则打包成一个可勾选的集合。
+///
+/// 与内置规则集（rule_set_catalogue()）的区别：内置集全是 GEOSITE/GEOIP
+/// 这类**内核自带**的大类，自定义集则是用户自己列的具体域名 / 关键字。
+/// 两者在 `rules:` 里混排，选中方式完全一样（都走 rule_sets 的 id 列表）。
+struct CustomRuleSet {
+  std::string id;        ///< 稳定标识，参与 rule_sets 选择；不能与内置集 id 冲突
+  std::string name;      ///< 界面显示名（可省，缺省用 id）
+  /// 该集合的处置。除 `DIRECT` / `REJECT` 外，也可以是**任意代理组名**
+  /// （例如 `🚀 节点选择`）—— 表示这批域名走代理。
+  std::string policy = "DIRECT";
+  std::vector<CustomRule> rules;
 };
 
 /// 全部可选规则集，顺序即界面展示顺序。
 /// 注意 `rules:` 里的实际顺序由 build_clash_rules 决定：REJECT 永远排在 DIRECT 之前。
 [[nodiscard]] std::vector<RuleSetInfo> rule_set_catalogue();
+
+/// 一条规则类型的中文对照（供 Web UI 的类型下拉使用）。
+///
+/// `value` 是**必须原样写进配置**的内核字面类型名（mihomo 按字面比较，大小写敏感），
+/// `label` 只是给人看的中文说明 —— 两者绝不能混用。
+struct RuleTypeInfo {
+  std::string value;  ///< 内核认的类型名，如 "DOMAIN-SUFFIX"
+  std::string label;  ///< 中文对照，如 "域名后缀（含子域名）"
+  std::string note;   ///< 一句话说明 / 例子
+};
+
+/// 全部规则类型，顺序即下拉展示顺序。这是界面类型下拉的唯一真源。
+[[nodiscard]] std::vector<RuleTypeInfo> rule_type_catalogue();
+
+/// 把「自定义规则集」的 JSON 解析出来。
+///
+/// 接受两种形态（都很好写）：
+/// ```jsonc
+/// // 形态 A：对象，key 就是规则集 id
+/// {"ads2": {"policy": "REJECT", "rules": [{"type": "DOMAIN-KEYWORD", "value": "ads"}]}}
+///
+/// // 形态 B：数组，id 写在元素里
+/// [{"id": "ads2", "name": "广告加强", "policy": "REJECT",
+///   "rules": [{"type": "DOMAIN", "value": "a.com"}]}]
+/// ```
+/// `rules` 里的项也接受字符串简写：`"DOMAIN-KEYWORD,ads"` / `"DOMAIN,a.com"`。
+/// 解析失败返回错误（含具体原因），而不是静默丢弃。
+[[nodiscard]] Result<std::vector<CustomRuleSet>> parse_custom_rule_sets(std::string_view json);
 
 /// 默认选中的规则集 id（保持与旧版输出一致：本地 + 中国）。
 [[nodiscard]] std::vector<std::string> default_rule_sets();
@@ -64,6 +121,12 @@ struct EmitOptions {
   bool include_rules = true;
   /// 选中的分流规则集 id（见 rule_set_catalogue()）；顺序无关，空表示只留 MATCH 兜底。
   std::vector<std::string> rule_sets = default_rule_sets();
+  /// 用户自定义的规则集（见 parse_custom_rule_sets()）。
+  ///
+  /// 它们与内置集**共用 rule_sets 这个选择列表**：自定义集的 id 出现在
+  /// rule_sets 里就会被展开。两者一起参与「REJECT 先于 DIRECT」的重排，
+  /// 所以自定义的 REJECT 集同样能压住内置的 DIRECT 集。
+  std::vector<CustomRuleSet> custom_rule_sets;
   /// dns 段的 nameserver：预设 id（见 dns_catalogue()）或字面地址（IP / DoH、DoT URL）混写。
   /// 空表示不写 nameserver。
   std::vector<std::string> dns = default_dns();

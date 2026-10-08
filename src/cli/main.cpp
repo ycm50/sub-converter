@@ -66,6 +66,14 @@ void print_usage(std::FILE* out) {
       --no-rules           不输出 rules 段（只生成 proxies/proxy-groups）
       --rulesets <列表>    分流规则集（clash 目标），逗号分隔；见 --list-rulesets
                            默认 local,cn；给空串则只留 MATCH 兜底
+                           自定义规则集的 id 也写在这里
+      --ruleset-json <JSON>   追加自定义规则集：自己列域名 / 关键字，可重复
+                               {"id":{"policy":"REJECT","rules":[
+                                  {"type":"DOMAIN-KEYWORD","value":"ads"},
+                                  {"type":"DOMAIN-SUFFIX","value":"doubleclick.net"}]}}
+                               rules 也接受简写字符串 "DOMAIN-KEYWORD,ads"；
+                               policy 可以是 DIRECT / REJECT，或某个代理组名（走代理）
+      --ruleset-file <文件>   从文件读自定义规则集（格式同上），可重复
       --dns <列表>         dns.nameserver：预设 id 或字面地址（IP / DoH URL），逗号分隔
                            见 --list-dns，默认 cloudflare,google；给空串则不写 nameserver
       --ipv6 / --no-ipv6   根节点与 dns 段的 ipv6，默认开
@@ -250,6 +258,32 @@ int parse_args(int argc, char** argv, Options& opt, std::string& error) {
       }
     } else if (arg == "--list-rulesets") {
       opt.list_rulesets = true;
+    } else if (arg == "--ruleset-json" || arg == "--custom-rulesets") {
+      const char* v = need(i, "--ruleset-json");
+      if (v == nullptr) return -1;
+      // 直接解析成结构化规则；解析失败立刻报错，不带着半份规则往下跑
+      auto parsed = subconv::parse_custom_rule_sets(v);
+      if (!parsed) {
+        error = std::string("--ruleset-json 解析失败：") + parsed.error().message;
+        return -1;
+      }
+      for (auto& set : *parsed) opt.emit.custom_rule_sets.push_back(std::move(set));
+    } else if (arg == "--ruleset-file") {
+      const char* v = need(i, "--ruleset-file");
+      if (v == nullptr) return -1;
+      std::ifstream in(v, std::ios::binary);
+      if (!in) {
+        error = std::string("无法打开规则集文件 ") + v;
+        return -1;
+      }
+      std::ostringstream buffer;
+      buffer << in.rdbuf();
+      auto parsed = subconv::parse_custom_rule_sets(buffer.str());
+      if (!parsed) {
+        error = std::string("规则集文件 ") + v + " 解析失败：" + parsed.error().message;
+        return -1;
+      }
+      for (auto& set : *parsed) opt.emit.custom_rule_sets.push_back(std::move(set));
     } else if (arg == "--dns") {
       const char* v = need(i, "--dns");
       if (v == nullptr) return -1;
@@ -394,7 +428,7 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (opt.list_rulesets) {
-    subconv::console::write_line(stdout, "可选规则集（clash 目标的 rules 段）：");
+    subconv::console::write_line(stdout, "内置规则集（clash 目标的 rules 段）：");
     for (const auto& rs : subconv::rule_set_catalogue()) {
       std::string id = rs.id;
       if (id.size() < 12) id.append(12 - id.size(), ' ');
@@ -403,6 +437,22 @@ int main(int argc, char** argv) {
     subconv::console::write_line(stdout,
                                  "默认: " + join_plain(subconv::default_rule_sets()) +
                                      "（用 --rulesets a,b 覆盖；给空串只留 MATCH 兜底）");
+    // 自定义规则集一并列出来，且必须**排在默认值提示之前**说明清楚：
+    // 它们只在本次转换里生效，没有"默认选中"的概念。
+    if (!opt.emit.custom_rule_sets.empty()) {
+      subconv::console::write_line(stdout, "自定义规则集（--ruleset-json / --ruleset-file）：");
+      for (const auto& set : opt.emit.custom_rule_sets) {
+        std::string id = set.id;
+        if (id.size() < 12) id.append(12 - id.size(), ' ');
+        subconv::console::write_line(stdout, "  " + id + set.name + " [" + set.policy + "]  " +
+                                                 std::to_string(set.rules.size()) + " 条规则");
+      }
+      subconv::console::write_line(stdout, "自定义集随转换请求一起提交即生效，无需再写进 --rulesets。");
+    } else {
+      subconv::console::write_line(
+          stdout, "自定义规则集：用 --ruleset-json '<JSON>' 或 --ruleset-file <文件> 添加，"
+                  "加了就会生效（--rulesets 只管内置集的挑选）。");
+    }
     return 0;
   }
   if (opt.list_dns) {
